@@ -1,6 +1,15 @@
 from datetime import datetime
+import re
+import unicodedata
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+
+
+def normalize_account_name(value: str) -> str:
+    """Turn a human label or email into a stable URL-safe account identifier."""
+    ascii_value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
+    normalized = re.sub(r"[^a-zA-Z0-9_-]+", "-", ascii_value.strip()).strip("-_")
+    return normalized.lower()[:100]
 
 
 class AccountBase(BaseModel):
@@ -23,6 +32,13 @@ class AccountBase(BaseModel):
     trash_mailbox: str | None = None
     archive_mailbox: str | None = None
     junk_mailbox: str | None = None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def safe_internal_name(cls, value: object) -> object:
+        if isinstance(value, str):
+            return normalize_account_name(value)
+        return value
 
     @model_validator(mode="after")
     def tls_modes(self):

@@ -4,6 +4,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.config import Settings
+from app.schemas import normalize_account_name
 from app.security import (
     CredentialCipher,
     create_api_key,
@@ -59,3 +60,11 @@ def test_permissions_block_ungranted():
     )
     with pytest.raises(Exception, match="Permission required"):
         require_permission("delete", {"read"}, settings)
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [("Lambert Florian", "lambert-florian"), ("Équipe@LFInfo.be", "equipe-lfinfo-be")],
+)
+def test_account_name_normalization(value, expected):
+    assert normalize_account_name(value) == expected
