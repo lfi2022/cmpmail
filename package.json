@@ -1,0 +1,19 @@
+{
+  "name": "lfinfo-mail-mcp",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:restart": "pm2 restart lfinfo-mail-mcp --update-env",
+    "pm2:reload": "pm2 reload lfinfo-mail-mcp --update-env",
+    "pm2:stop": "pm2 stop lfinfo-mail-mcp",
+    "pm2:logs": "pm2 logs lfinfo-mail-mcp",
+    "pm2:status": "pm2 status"
+  },
+  "devDependencies": {
+    "pm2": "^7.0.3"
+  },
+  "overrides": {
+    "js-yaml": "4.3.1"
+  }
+}
