@@ -30,6 +30,15 @@ def content_security_policy(path: str) -> str:
     return f"{CONTENT_SECURITY_POLICY_BASE}; form-action {form_action}"
 
 
+def normalize_mcp_path(path: str, method: str, mcp_path: str) -> str:
+    """Route POST / to MCP while preserving GET / for the administration UI."""
+    if method == "POST" and path == "/":
+        return f"{mcp_path}/"
+    if path == mcp_path:
+        return f"{mcp_path}/"
+    return path
+
+
 class SecurityMiddleware:
     """Pure ASGI middleware so MCP streaming is never buffered by BaseHTTPMiddleware."""
 
@@ -97,7 +106,14 @@ class SecurityMiddleware:
                 "Rate limit exceeded",
                 [(b"retry-after", b"60")],
             )
-        path = scope.get("path", "")
+        original_path = scope.get("path", "")
+        path = normalize_mcp_path(
+            original_path, scope.get("method", "GET"), self.settings.mcp_path
+        )
+        if path != original_path:
+            scope = dict(scope)
+            scope["path"] = path
+            scope["raw_path"] = path.encode()
         actor_token = permission_token = meta_token = None
         if path == self.settings.mcp_path or path.startswith(
             self.settings.mcp_path + "/"
@@ -204,13 +220,6 @@ class SecurityMiddleware:
                 return await self._reject(
                     scope, receive, send, 403, "CSRF token missing or invalid"
                 )
-        # A mounted Starlette app does not match its bare prefix. Normalize the
-        # internal path so POST /mcp reaches the mounted root without a redirect.
-        if path == self.settings.mcp_path:
-            scope = dict(scope)
-            scope["path"] = f"{path}/"
-            scope["raw_path"] = f"{path}/".encode()
-
         async def secure_send(message: dict[str, Any]):
             if message.get("type") == "http.response.start":
                 response_headers = list(message.get("headers", []))

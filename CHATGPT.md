@@ -20,3 +20,4 @@ curl -i https://mcp.lfinfo.be/mcp
 
 Le dernier appel doit retourner `401` avec un en-tête `WWW-Authenticate` contenant `resource_metadata`. Un échec `invalid_target` indique généralement que `OAUTH_RESOURCE` diffère de l’URL MCP. Un échec de callback indique une URI non enregistrée exactement. Si ChatGPT demande un nouveau consentement, vérifiez que les sessions ou le client n’ont pas été révoqués dans l’administration.
 
+Pour tolérer un connecteur créé avec `https://mcp.lfinfo.be` sans suffixe, `POST /` est également acheminé vers le transport MCP. `GET /` continue de servir exclusivement l’interface d’administration. L’URL canonique à utiliser reste `https://mcp.lfinfo.be/mcp`.

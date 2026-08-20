@@ -4,7 +4,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.config import Settings
-from app.middleware import content_security_policy
+from app.middleware import content_security_policy, normalize_mcp_path
 from app.schemas import normalize_account_name
 from app.security import (
     CredentialCipher,
@@ -77,3 +77,9 @@ def test_csp_allows_registered_https_oauth_callback_redirects():
     )
     assert "form-action 'self' https:" not in content_security_policy("/")
     assert "default-src 'self'" in content_security_policy("/")
+
+
+def test_root_post_is_routed_to_mcp_without_moving_admin_get():
+    assert normalize_mcp_path("/", "POST", "/mcp") == "/mcp/"
+    assert normalize_mcp_path("/", "GET", "/mcp") == "/"
+    assert normalize_mcp_path("/mcp", "POST", "/mcp") == "/mcp/"
