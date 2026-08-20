@@ -198,6 +198,20 @@ def test_05_dynamic_public_client_registration(oauth_app):
     )
 
 
+def test_dcr_without_scope_can_request_every_advertised_scope(oauth_app):
+    client, _ = oauth_app
+    response = client.post(
+        "/oauth/register",
+        json={
+            "client_name": "ChatGPT",
+            "redirect_uris": ["https://chatgpt.com/connector/oauth/callback"],
+            "token_endpoint_auth_method": "none",
+        },
+    )
+    scopes = set(response.json()["scope"].split())
+    assert {"offline_access", "accounts.write", "mail.send", "mail.delete"} <= scopes
+
+
 def test_06_dcr_rejects_insecure_remote_redirect(oauth_app):
     client, _ = oauth_app
     assert register(client, "http://evil.example/callback").status_code == 400

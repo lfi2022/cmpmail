@@ -2,12 +2,21 @@ from datetime import datetime
 import re
 import unicodedata
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 def normalize_account_name(value: str) -> str:
     """Turn a human label or email into a stable URL-safe account identifier."""
-    ascii_value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
+    ascii_value = (
+        unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
+    )
     normalized = re.sub(r"[^a-zA-Z0-9_-]+", "-", ascii_value.strip()).strip("-_")
     return normalized.lower()[:100]
 

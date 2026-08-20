@@ -309,7 +309,11 @@ async def register(
         or method not in {"none", "client_secret_basic", "client_secret_post"}
     ):
         raise HTTPException(400, "unsupported client metadata")
-    requested = _scope_set(body.get("scope", " ".join(DEFAULT_SCOPES)))
+    # RFC 7591 clients such as ChatGPT may omit `scope` at registration and
+    # request the concrete scopes only at authorization time. In that case the
+    # client is eligible for every scope advertised by this authorization
+    # server; the user still sees and approves the exact requested set.
+    requested = _scope_set(body.get("scope", " ".join(SCOPES)))
     client_id = secrets.token_urlsafe(32)
     raw_secret = secrets.token_urlsafe(48) if method != "none" else None
     client = OAuthClient(
@@ -400,6 +404,16 @@ async def authorize(
 ):
     client, q = await _authorization_request(request, db, settings)
     if q.get("error"):
+        await oauth_audit(
+            db,
+            "oauth.authorize.rejected",
+            None,
+            client.client_id,
+            False,
+            error=q["error"],
+            description=q.get("description"),
+            requested_scopes=q.get("scope", "").split(),
+        )
         return _auth_error(
             q["redirect_uri"],
             q["error"],
