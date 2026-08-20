@@ -10,9 +10,9 @@ Serveur MCP Mail self-hosted réunissant, dans un seul processus FastAPI, une in
 - `/health`, `/ready`, `/version` : supervision.
 - IMAP : dossiers RFC 6154, delimiter réel, recherche, MIME, flags, MOVE/COPY avec remappage UID, drafts et suppression explicite.
 - SMTP : TLS/STARTTLS, Message-ID généré avant envoi et copie identique dans Sent.
-- Sécurité : secrets chiffrés, clé/Bearer MCP, permissions, session HttpOnly, CSRF, trusted hosts, CORS, rate limit et limites de taille.
+- Sécurité : OAuth 2.1/OIDC, PKCE S256, JWT RS256/JWKS, refresh rotation, scopes, sessions HttpOnly, CSRF, trusted hosts, CORS, rate limit et limites de taille.
 
-Installation rapide : voir [INSTALL.md](INSTALL.md). Configuration : [CONFIGURATION.md](CONFIGURATION.md). Outils : [MCP_TOOLS.md](MCP_TOOLS.md).
+Installation rapide : voir [INSTALL.md](INSTALL.md). OAuth : [OAUTH.md](OAUTH.md). Connexion ChatGPT : [CHATGPT.md](CHATGPT.md). Outils : [MCP_TOOLS.md](MCP_TOOLS.md).
 
 ## Développement
 
@@ -34,4 +34,3 @@ npm run dev
 ```
 
 Ne démarrez pas Vite en production. Compilez-le avec `npm run build`, puis PM2 lance uniquement FastAPI.
-

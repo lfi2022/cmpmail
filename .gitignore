@@ -12,6 +12,7 @@ data/*.db*
 data/pm2-smoke/
 logs/*.log
 node_modules/
+secrets/
 frontend/dist/
 .coverage
 htmlcov/

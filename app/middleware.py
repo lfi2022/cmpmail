@@ -91,12 +91,16 @@ class SecurityMiddleware:
                     Request(scope, receive=receive), self.settings
                 )
             except Exception as exc:
+                response_headers = []
+                for key, value in getattr(exc, "headers", {}).items():
+                    response_headers.append((key.lower().encode(), value.encode()))
                 return await self._reject(
                     scope,
                     receive,
                     send,
                     getattr(exc, "status_code", 401),
                     str(getattr(exc, "detail", exc)),
+                    response_headers,
                 )
             actor_token = current_actor.set(actor)
             permission_token = current_permissions.set(permissions)
@@ -107,6 +111,65 @@ class SecurityMiddleware:
                     "mcp_session": headers.get("mcp-session-id"),
                 }
             )
+            # MCP transports normally use JSON-RPC errors for tool failures,
+            # but authorization is enforced at the HTTP resource boundary so
+            # clients can react to RFC 6750 `insufficient_scope` responses.
+            if scope.get("method") == "POST" and "json" in headers.get(
+                "content-type", ""
+            ):
+                import json
+
+                chunks = []
+                more = True
+                while more:
+                    message = await receive()
+                    chunks.append(message.get("body", b""))
+                    more = message.get("more_body", False)
+                request_body = b"".join(chunks)
+                delivered = False
+
+                async def replay_receive():
+                    nonlocal delivered
+                    if delivered:
+                        return {"type": "http.request", "body": b"", "more_body": False}
+                    delivered = True
+                    return {
+                        "type": "http.request",
+                        "body": request_body,
+                        "more_body": False,
+                    }
+
+                receive = replay_receive
+                try:
+                    payload = json.loads(request_body)
+                    if payload.get("method") == "tools/call":
+                        from app.mcp_server import TOOL_PERMISSIONS
+
+                        tool = payload.get("params", {}).get("name")
+                        required = TOOL_PERMISSIONS.get(tool)
+                        if (
+                            required
+                            and required not in permissions
+                            and "admin" not in permissions
+                        ):
+                            current_actor.reset(actor_token)
+                            current_permissions.reset(permission_token)
+                            current_request_meta.reset(meta_token)
+                            return await self._reject(
+                                scope,
+                                receive,
+                                send,
+                                403,
+                                f"insufficient_scope: required scope {required}",
+                                [
+                                    (
+                                        b"www-authenticate",
+                                        f'Bearer error="insufficient_scope", scope="{required}", resource_metadata="{self.settings.issuer}/.well-known/oauth-protected-resource"'.encode(),
+                                    )
+                                ],
+                            )
+                except (ValueError, AttributeError):
+                    pass
         if (
             path.startswith("/api/")
             and scope.get("method") in {"POST", "PUT", "PATCH", "DELETE"}
@@ -129,8 +192,37 @@ class SecurityMiddleware:
             scope = dict(scope)
             scope["path"] = f"{path}/"
             scope["raw_path"] = f"{path}/".encode()
+
+        async def secure_send(message: dict[str, Any]):
+            if message.get("type") == "http.response.start":
+                response_headers = list(message.get("headers", []))
+                response_headers.extend(
+                    [
+                        (b"x-content-type-options", b"nosniff"),
+                        (b"x-frame-options", b"DENY"),
+                        (b"referrer-policy", b"no-referrer"),
+                        (
+                            b"permissions-policy",
+                            b"camera=(), microphone=(), geolocation=()",
+                        ),
+                        (
+                            b"content-security-policy",
+                            b"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+                        ),
+                    ]
+                )
+                if self.settings.public_url.startswith("https://"):
+                    response_headers.append(
+                        (
+                            b"strict-transport-security",
+                            b"max-age=31536000; includeSubDomains",
+                        )
+                    )
+                message = {**message, "headers": response_headers}
+            await send(message)
+
         try:
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, secure_send)
         finally:
             if actor_token is not None:
                 current_actor.reset(actor_token)

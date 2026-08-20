@@ -13,13 +13,22 @@ from app.audit import audit_event
 from app.auth import create_admin_session, require_admin
 from app.config import Settings, get_settings
 from app.database import check_database, get_db
-from app.models import ApiKey, AuditLog, MailAccount, OperationLog
+from app.models import (
+    ApiKey,
+    AuditLog,
+    MailAccount,
+    OperationLog,
+    OAuthClient,
+    OAuthRefreshToken,
+    OAuthSession,
+    OAuthUser,
+)
 from app.schemas import AccountCreate, AccountUpdate, ApiKeyCreate, LoginRequest
 from app.security import (
     CredentialCipher,
     PERMISSIONS,
     create_api_key,
-    verify_static_secret,
+    verify_secret,
 )
 from app.services.accounts import AccountRepository, public_account
 from app.services.mail import MailService
@@ -66,9 +75,13 @@ async def login(
     payload: LoginRequest,
     response: Response,
     settings: Settings = Depends(get_settings),
+    db: AsyncSession = Depends(get_db),
 ):
-    valid = payload.username == settings.admin_username and verify_static_secret(
-        settings.admin_password, payload.password
+    user = await db.scalar(
+        select(OAuthUser).where(OAuthUser.username == payload.username)
+    )
+    valid = bool(
+        user and user.active and verify_secret(user.password_hash, payload.password)
     )
     if not valid:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
@@ -440,6 +453,13 @@ async def configuration(settings: Settings = Depends(get_settings)):
         "blocked_attachment_types": settings.blocked_attachment_types,
         "max_request_size_mb": settings.max_request_size_mb,
         "destructive_operations_enabled": settings.destructive_operations_enabled,
+        "oauth": {
+            "enabled": settings.oauth_enabled,
+            "issuer": settings.issuer,
+            "resource": settings.resource,
+            "legacy_api_keys": settings.mcp_legacy_api_key_enabled,
+            "signing_kid": settings.oauth_signing_kid,
+        },
         "secrets": {
             "secret_key": "configured"
             if settings.secret_key != "A_REMPLIR"
@@ -452,3 +472,89 @@ async def configuration(settings: Settings = Depends(get_settings)):
             else "missing",
         },
     }
+
+
+@router.get("/oauth/clients", dependencies=[Depends(require_admin)])
+async def oauth_clients(db: AsyncSession = Depends(get_db)):
+    rows = (
+        await db.scalars(select(OAuthClient).order_by(OAuthClient.created_at.desc()))
+    ).all()
+    return [
+        {
+            "client_id": x.client_id,
+            "client_name": x.client_name,
+            "redirect_uris": x.redirect_uris,
+            "allowed_scopes": x.allowed_scopes,
+            "token_endpoint_auth_method": x.token_endpoint_auth_method,
+            "created_at": x.created_at,
+            "last_used_at": x.last_used_at,
+            "revoked_at": x.revoked_at,
+        }
+        for x in rows
+    ]
+
+
+@router.delete("/oauth/clients/{client_id}", dependencies=[Depends(require_admin)])
+async def revoke_oauth_client(client_id: str, db: AsyncSession = Depends(get_db)):
+    client = await db.get(OAuthClient, client_id)
+    if not client:
+        raise HTTPException(404, "OAuth client not found")
+    client.revoked_at = datetime.now(timezone.utc)
+    sessions = (
+        await db.scalars(
+            select(OAuthSession).where(
+                OAuthSession.client_id == client_id, OAuthSession.revoked_at.is_(None)
+            )
+        )
+    ).all()
+    for session in sessions:
+        session.revoked_at = datetime.now(timezone.utc)
+    await db.commit()
+    await record_admin_audit(
+        db, "oauth.client.revoked", client_id, {"sessions": len(sessions)}
+    )
+    return {"success": True, "revoked_sessions": len(sessions)}
+
+
+@router.get("/oauth/sessions", dependencies=[Depends(require_admin)])
+async def oauth_sessions(db: AsyncSession = Depends(get_db)):
+    rows = (
+        await db.scalars(
+            select(OAuthSession).order_by(OAuthSession.last_used_at.desc()).limit(500)
+        )
+    ).all()
+    users = {u.id: u.username for u in (await db.scalars(select(OAuthUser))).all()}
+    return [
+        {
+            "id": x.id,
+            "client_id": x.client_id,
+            "user": users.get(x.user_id),
+            "scopes": x.scopes,
+            "resource": x.resource,
+            "ip": x.ip,
+            "user_agent": x.user_agent,
+            "created_at": x.created_at,
+            "last_used_at": x.last_used_at,
+            "expires_at": x.expires_at,
+            "revoked_at": x.revoked_at,
+        }
+        for x in rows
+    ]
+
+
+@router.delete("/oauth/sessions/{session_id}", dependencies=[Depends(require_admin)])
+async def revoke_oauth_session(session_id: str, db: AsyncSession = Depends(get_db)):
+    session = await db.get(OAuthSession, session_id)
+    if not session:
+        raise HTTPException(404, "OAuth session not found")
+    session.revoked_at = datetime.now(timezone.utc)
+    tokens = (
+        await db.scalars(
+            select(OAuthRefreshToken).where(OAuthRefreshToken.session_id == session_id)
+        )
+    ).all()
+    for token in tokens:
+        token.revoked_at = datetime.now(timezone.utc)
+    await db.commit()
+    await record_admin_audit(db, "oauth.session.revoked", session_id)
+    return {"success": True}

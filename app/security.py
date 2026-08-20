@@ -20,6 +20,16 @@ PERMISSIONS = {
     "folders",
     "attachments",
     "admin",
+    "accounts.read",
+    "accounts.write",
+    "mail.read",
+    "mail.send",
+    "mail.move",
+    "mail.copy",
+    "mail.flags",
+    "mail.delete",
+    "mail.folders",
+    "mail.attachments",
 }
 MUTATING_PERMISSIONS = {"send", "move", "copy", "flags", "delete", "folders"}
 _hasher = PasswordHasher()
@@ -80,14 +90,30 @@ def require_permission(permission: str, granted: set[str], settings: Settings) -
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Unknown permission")
     if permission not in granted and "admin" not in granted:
         raise HTTPException(
-            status.HTTP_403_FORBIDDEN, f"Permission required: {permission}"
+            status.HTTP_403_FORBIDDEN,
+            f"Permission required: {permission} (insufficient_scope)",
+            headers={
+                "WWW-Authenticate": f'Bearer error="insufficient_scope", scope="{permission}"'
+            },
         )
-    if settings.read_only and permission in MUTATING_PERMISSIONS:
+    mutating = permission in MUTATING_PERMISSIONS or permission in {
+        "accounts.write",
+        "mail.send",
+        "mail.move",
+        "mail.copy",
+        "mail.flags",
+        "mail.delete",
+        "mail.folders",
+    }
+    if settings.read_only and mutating:
         if permission != "copy" or not settings.allow_copy_in_read_only:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN, "Server is in read-only mode"
             )
-    if permission == "delete" and not settings.destructive_operations_enabled:
+    if (
+        permission in {"delete", "mail.delete"}
+        and not settings.destructive_operations_enabled
+    ):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Destructive operations are disabled"
         )

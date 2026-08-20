@@ -9,7 +9,11 @@ Variables essentielles :
 | `PUBLIC_URL`, `MCP_PATH` | URL publique calculée et chemin MCP |
 | `SECRET_KEY` | signature des sessions admin et jetons CSRF |
 | `ENCRYPTION_KEY` | chiffrement Fernet des mots de passe mail |
-| `MCP_AUTH_ENABLED`, `MCP_API_KEY` | authentification MCP globale |
+| `MCP_AUTH_ENABLED`, `OAUTH_ENABLED` | authentification OAuth du endpoint MCP |
+| `OAUTH_ISSUER`, `OAUTH_RESOURCE` | émetteur public et audience MCP exacte |
+| `OAUTH_SIGNING_KEY_PATH`, `OAUTH_SIGNING_PUBLIC_KEY_PATH`, `OAUTH_SIGNING_KID` | signature JWT RS256 et publication JWKS |
+| `ADMIN_USERNAME`, `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH` | utilisateur local Argon2id initial |
+| `MCP_LEGACY_API_KEY_ENABLED`, `MCP_API_KEY` | compatibilité historique, désactivée par défaut |
 | `ALLOWED_HOSTS` | protection Host/DNS rebinding |
 | `ALLOWED_ORIGINS` | origines navigateur autorisées |
 | `TRUSTED_PROXIES` | IP/CIDR autorisés à fournir `X-Forwarded-For` |

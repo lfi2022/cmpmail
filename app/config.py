@@ -19,9 +19,23 @@ class Settings(BaseSettings):
     secret_key: str = "A_REMPLIR"
     encryption_key: str = "A_REMPLIR"
     admin_username: str = "admin"
-    admin_password: str = "A_REMPLIR"
+    admin_email: str = "admin@localhost"
+    admin_password_hash: str = "A_REMPLIR"
     mcp_auth_enabled: bool = True
     mcp_api_key: str = "A_REMPLIR"
+    mcp_legacy_api_key_enabled: bool = False
+    oauth_enabled: bool = True
+    oauth_issuer: str | None = None
+    oauth_resource: str | None = None
+    oauth_signing_key_path: Path = Path("secrets/oauth-private.pem")
+    oauth_signing_public_key_path: Path = Path("secrets/oauth-public.pem")
+    oauth_signing_kid: str = "mailmcp-2026-01"
+    oauth_access_token_minutes: int = 15
+    oauth_refresh_token_days: int = 30
+    oauth_authorization_code_minutes: int = 5
+    oauth_session_hours: int = 8
+    oauth_login_attempts: int = 5
+    oauth_login_lock_minutes: int = 15
     allowed_hosts: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["localhost", "127.0.0.1"]
     )
@@ -68,15 +82,36 @@ class Settings(BaseSettings):
     def mcp_url(self) -> str:
         return f"{self.public_url.rstrip('/')}{self.mcp_path}"
 
+    @property
+    def issuer(self) -> str:
+        return (self.oauth_issuer or self.public_url).rstrip("/")
+
+    @property
+    def resource(self) -> str:
+        return self.oauth_resource or self.mcp_url
+
     def production_errors(self) -> list[str]:
         errors = []
-        for name in ("secret_key", "encryption_key", "admin_password"):
+        for name in ("secret_key", "encryption_key"):
             if getattr(self, name) == "A_REMPLIR":
                 errors.append(f"{name.upper()} must be configured")
-        if self.mcp_auth_enabled and self.mcp_api_key == "A_REMPLIR":
+        if self.admin_password_hash == "A_REMPLIR":
+            errors.append("ADMIN_PASSWORD_HASH must be configured")
+        if (
+            self.mcp_auth_enabled
+            and self.mcp_legacy_api_key_enabled
+            and self.mcp_api_key == "A_REMPLIR"
+        ):
             errors.append(
-                "MCP_API_KEY must be configured when MCP authentication is enabled"
+                "MCP_API_KEY must be configured when legacy MCP API keys are enabled"
             )
+        if self.oauth_enabled:
+            for path in (
+                self.oauth_signing_key_path,
+                self.oauth_signing_public_key_path,
+            ):
+                if not path.is_file():
+                    errors.append(f"OAuth signing key missing: {path}")
         return errors
 
 

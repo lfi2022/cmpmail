@@ -16,6 +16,7 @@ cd ..
 cp .env.example .env
 nano .env
 mkdir -p logs data
+python scripts/generate-oauth-secrets.py
 alembic upgrade head
 pm2 start ecosystem.config.js
 pm2 save
@@ -29,6 +30,8 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
+Le script OAuth affiche le hash Argon2id et les chemins de clés à reporter dans `.env`. Il ne faut jamais committer le dossier `secrets/`. Voir [OAUTH.md](OAUTH.md).
+
 Contrôles :
 
 ```bash
@@ -39,4 +42,3 @@ pm2 status
 ```
 
 `/ready` reste en 503 tant que la configuration, la DB ou un compte actif manque. C'est volontaire.
-

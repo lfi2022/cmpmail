@@ -71,9 +71,23 @@ async def authenticate_mcp(
     authorization = request.headers.get("authorization", "")
     if authorization.lower().startswith("bearer "):
         supplied = authorization[7:].strip()
-    if supplied and verify_static_secret(settings.mcp_api_key, supplied):
+    if supplied and settings.oauth_enabled:
+        from app.oauth import validate_access_token
+
+        async with SessionLocal() as db:
+            try:
+                claims = await validate_access_token(supplied, settings, db)
+                return f"oauth:{claims['sub']}", set(claims["scope"].split())
+            except HTTPException:
+                if not settings.mcp_legacy_api_key_enabled:
+                    raise
+    if (
+        supplied
+        and settings.mcp_legacy_api_key_enabled
+        and verify_static_secret(settings.mcp_api_key, supplied)
+    ):
         return "environment-key", set(PERMISSIONS)
-    if supplied:
+    if supplied and settings.mcp_legacy_api_key_enabled:
         prefix = supplied[:12]
         async with SessionLocal() as db:
             keys = (
@@ -91,5 +105,10 @@ async def authenticate_mcp(
     raise HTTPException(
         status.HTTP_401_UNAUTHORIZED,
         "Missing or invalid MCP credential",
-        headers={"WWW-Authenticate": "Bearer"},
+        headers={
+            "WWW-Authenticate": (
+                f'Bearer resource_metadata="{settings.issuer}/.well-known/'
+                'oauth-protected-resource", scope="accounts.read mail.read"'
+            )
+        },
     )

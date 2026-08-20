@@ -16,6 +16,7 @@ from app.database import SessionLocal, check_database
 from app.mcp_server import mcp
 from app.middleware import SecurityMiddleware
 from app.models import MailAccount
+from app.oauth import bootstrap_oauth_user, router as oauth_router
 from app.routers.admin import router as admin_router
 
 settings = get_settings()
@@ -42,6 +43,8 @@ mcp_asgi = mcp.streamable_http_app(
 async def lifespan(app: FastAPI):
     Path("data").mkdir(exist_ok=True)
     Path("logs").mkdir(exist_ok=True)
+    async with SessionLocal() as db:
+        await bootstrap_oauth_user(settings, db)
     async with mcp.session_manager.run():
         yield
 
@@ -72,6 +75,7 @@ app.add_middleware(
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
 app.add_middleware(SecurityMiddleware, settings=settings)
 app.include_router(admin_router)
+app.include_router(oauth_router)
 
 
 @app.get("/health")

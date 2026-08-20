@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from mcp.server import MCPServer
+from mcp_types import ToolAnnotations
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import audit_event
@@ -19,15 +20,15 @@ from app.services.mail import MailService, failure, partial, plain_forward, resu
 settings = get_settings()
 mcp = MCPServer(
     "LFINFO Mail MCP",
-    instructions="Production IMAP/SMTP tools. UIDs are scoped to an account and canonical mailbox. Permanent-delete tools are destructive.",
+    instructions="Production IMAP/SMTP tools protected by OAuth scopes. UIDs are scoped to an account and canonical mailbox. Permanent-delete tools are destructive.",
     version="1.0.0",
 )
 
 TOOL_PERMISSIONS = {
-    "list_accounts": "read",
-    "get_account": "read",
-    "test_account": "read",
-    "set_default_account": "admin",
+    "list_accounts": "accounts.read",
+    "get_account": "accounts.read",
+    "test_account": "accounts.read",
+    "set_default_account": "accounts.write",
     "list_mailboxes": "read",
     "get_mailbox": "read",
     "resolve_mailbox": "read",
@@ -74,6 +75,23 @@ TOOL_PERMISSIONS = {
     "list_attachments": "attachments",
     "download_attachment": "attachments",
     "save_attachment": "attachments",
+}
+
+# Convert the legacy capability names into explicit OAuth scopes. Keeping the
+# table centralized makes each tool's least-privilege requirement auditable.
+_SCOPE_BY_PERMISSION = {
+    "read": "mail.read",
+    "send": "mail.send",
+    "move": "mail.move",
+    "copy": "mail.copy",
+    "flags": "mail.flags",
+    "delete": "mail.delete",
+    "folders": "mail.folders",
+    "attachments": "mail.attachments",
+}
+TOOL_PERMISSIONS = {
+    name: _SCOPE_BY_PERMISSION.get(permission, permission)
+    for name, permission in TOOL_PERMISSIONS.items()
 }
 SENSITIVE = {
     "send_email",
@@ -282,7 +300,7 @@ async def rename_mailbox(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True, idempotentHint=False))
 async def delete_mailbox(
     mailbox: str, account_name: str | None = None
 ) -> dict[str, Any]:
@@ -752,7 +770,7 @@ async def restore_emails(
     return await execute("restore_emails", account_name, action)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True, idempotentHint=True))
 async def delete_email_permanently(
     mailbox: str, uid: int, account_name: str | None = None
 ):
@@ -764,7 +782,7 @@ async def delete_email_permanently(
     return await execute("delete_email_permanently", account_name, action)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True, idempotentHint=True))
 async def delete_emails_permanently(
     mailbox: str, uids: list[int], account_name: str | None = None
 ):
@@ -929,7 +947,7 @@ async def update_draft(
     return await execute("update_draft", account_name, action)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True, idempotentHint=True))
 async def delete_draft(mailbox: str, uid: int, account_name: str | None = None):
     async def action(db, repo, account, service):
         return await service.permanent_delete(mailbox, [uid])
