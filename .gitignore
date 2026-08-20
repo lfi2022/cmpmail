@@ -4,6 +4,7 @@
 .tooling/
 __pycache__/
 *.py[cod]
+*.tsbuildinfo
 .pytest_cache/
 .pytest_tmp/
 .ruff_cache/
