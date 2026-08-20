@@ -1,0 +1,454 @@
+import asyncio
+import socket
+import ssl
+from datetime import datetime, timezone
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app import __version__
+from app.audit import audit_event
+from app.auth import create_admin_session, require_admin
+from app.config import Settings, get_settings
+from app.database import check_database, get_db
+from app.models import ApiKey, AuditLog, MailAccount, OperationLog
+from app.schemas import AccountCreate, AccountUpdate, ApiKeyCreate, LoginRequest
+from app.security import (
+    CredentialCipher,
+    PERMISSIONS,
+    create_api_key,
+    verify_static_secret,
+)
+from app.services.accounts import AccountRepository, public_account
+from app.services.mail import MailService
+
+router = APIRouter(prefix="/api")
+started_at = datetime.now(timezone.utc)
+
+
+async def record_admin_audit(
+    db: AsyncSession, action: str, target: str, details: dict | None = None
+) -> None:
+    db.add(
+        AuditLog(
+            action=action,
+            actor="admin",
+            target=target,
+            details=details or {},
+            success=True,
+        )
+    )
+    await db.commit()
+    audit_event(
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        action=action,
+        actor="admin",
+        target=target,
+        success=True,
+        details=details,
+    )
+
+
+def repository(
+    db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings)
+) -> AccountRepository:
+    try:
+        cipher = CredentialCipher(settings.encryption_key)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return AccountRepository(db, cipher)
+
+
+@router.post("/auth/login")
+async def login(
+    payload: LoginRequest,
+    response: Response,
+    settings: Settings = Depends(get_settings),
+):
+    valid = payload.username == settings.admin_username and verify_static_secret(
+        settings.admin_password, payload.password
+    )
+    if not valid:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
+    response.set_cookie(
+        "mailmcp_session",
+        create_admin_session(payload.username, settings),
+        httponly=True,
+        secure=settings.secure_cookies,
+        samesite="strict",
+        max_age=8 * 3600,
+        path="/",
+    )
+    csrf = create_admin_session("csrf", settings)
+    response.set_cookie(
+        "mailmcp_csrf",
+        csrf,
+        httponly=False,
+        secure=settings.secure_cookies,
+        samesite="strict",
+        max_age=8 * 3600,
+        path="/",
+    )
+    return {"success": True, "csrf_token": csrf}
+
+
+@router.post("/auth/logout")
+async def logout(response: Response):
+    response.delete_cookie("mailmcp_session", path="/")
+    response.delete_cookie("mailmcp_csrf", path="/")
+    return {"success": True}
+
+
+@router.get("/dashboard", dependencies=[Depends(require_admin)])
+async def dashboard(
+    db: AsyncSession = Depends(get_db), settings: Settings = Depends(get_settings)
+):
+    accounts = await db.scalar(select(func.count()).select_from(MailAccount))
+    operations = await db.scalar(select(func.count()).select_from(OperationLog))
+    default = await db.scalar(
+        select(MailAccount.name).where(MailAccount.is_default.is_(True))
+    )
+    errors = list(
+        (
+            await db.scalars(
+                select(OperationLog.error)
+                .where(OperationLog.success.is_(False))
+                .order_by(OperationLog.timestamp.desc())
+                .limit(5)
+            )
+        ).all()
+    )
+    return {
+        "status": "ok",
+        "uptime_seconds": int(
+            (datetime.now(timezone.utc) - started_at).total_seconds()
+        ),
+        "version": __version__,
+        "accounts": accounts,
+        "default_account": default,
+        "recent_operations": operations,
+        "last_errors": errors,
+        "database": await check_database(),
+        "mcp_url": settings.mcp_url,
+        "read_only": settings.read_only,
+    }
+
+
+@router.get("/accounts", dependencies=[Depends(require_admin)])
+async def list_accounts(repo: AccountRepository = Depends(repository)):
+    return [public_account(account) for account in await repo.list()]
+
+
+@router.post("/accounts", status_code=201, dependencies=[Depends(require_admin)])
+async def create_account(
+    payload: AccountCreate, repo: AccountRepository = Depends(repository)
+):
+    try:
+        account = await repo.create(payload)
+        await record_admin_audit(repo.db, "account.create", account.name)
+        return public_account(account)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.patch("/accounts/{name}", dependencies=[Depends(require_admin)])
+async def update_account(
+    name: str, payload: AccountUpdate, repo: AccountRepository = Depends(repository)
+):
+    try:
+        account = await repo.update(name, payload)
+        await record_admin_audit(repo.db, "account.update", name)
+        return public_account(account)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.delete(
+    "/accounts/{name}", status_code=204, dependencies=[Depends(require_admin)]
+)
+async def delete_account(name: str, repo: AccountRepository = Depends(repository)):
+    try:
+        await repo.delete(name)
+        await record_admin_audit(repo.db, "account.delete", name)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/accounts/{name}/default", dependencies=[Depends(require_admin)])
+async def set_default(name: str, repo: AccountRepository = Depends(repository)):
+    return public_account(await repo.set_default(name))
+
+
+@router.post("/accounts/{name}/test", dependencies=[Depends(require_admin)])
+async def test_account(
+    name: str,
+    repo: AccountRepository = Depends(repository),
+    settings: Settings = Depends(get_settings),
+):
+    account = await repo.get(name)
+    return await MailService(account, repo.cipher, settings).test()
+
+
+@router.post("/accounts/{name}/test-imap", dependencies=[Depends(require_admin)])
+async def test_account_imap(
+    name: str,
+    repo: AccountRepository = Depends(repository),
+    settings: Settings = Depends(get_settings),
+):
+    account = await repo.get(name)
+    return await MailService(account, repo.cipher, settings).test_imap()
+
+
+@router.post("/accounts/{name}/test-smtp", dependencies=[Depends(require_admin)])
+async def test_account_smtp(
+    name: str,
+    repo: AccountRepository = Depends(repository),
+    settings: Settings = Depends(get_settings),
+):
+    account = await repo.get(name)
+    return await MailService(account, repo.cipher, settings).test_smtp()
+
+
+@router.post("/accounts/{name}/detect-folders", dependencies=[Depends(require_admin)])
+async def detect_folders(
+    name: str,
+    repo: AccountRepository = Depends(repository),
+    settings: Settings = Depends(get_settings),
+):
+    account = await repo.get(name)
+    folders = (await MailService(account, repo.cipher, settings).list_mailboxes())[
+        "data"
+    ]
+    values = {
+        f"{item['special_use']}_mailbox": item["canonical_name"]
+        for item in folders
+        if item["special_use"]
+    }
+    await repo.update(name, AccountUpdate(**values))
+    return {"success": True, "detected": values, "mailboxes": folders}
+
+
+@router.get("/accounts/{name}/mailboxes", dependencies=[Depends(require_admin)])
+async def account_mailboxes(
+    name: str,
+    repo: AccountRepository = Depends(repository),
+    settings: Settings = Depends(get_settings),
+):
+    return await MailService(
+        await repo.get(name), repo.cipher, settings
+    ).list_mailboxes()
+
+
+@router.get("/accounts/{name}/messages", dependencies=[Depends(require_admin)])
+async def account_messages(
+    name: str,
+    mailbox: str = "INBOX",
+    page: int = 1,
+    page_size: int = 50,
+    repo: AccountRepository = Depends(repository),
+    settings: Settings = Depends(get_settings),
+):
+    return await MailService(await repo.get(name), repo.cipher, settings).list_emails(
+        mailbox, page, page_size
+    )
+
+
+@router.get("/api-keys", dependencies=[Depends(require_admin)])
+async def list_keys(db: AsyncSession = Depends(get_db)):
+    keys = (await db.scalars(select(ApiKey).order_by(ApiKey.created_at.desc()))).all()
+    return [
+        {
+            "id": k.id,
+            "name": k.name,
+            "prefix": k.prefix,
+            "permissions": k.permissions,
+            "enabled": k.enabled,
+            "created_at": k.created_at,
+            "last_used_at": k.last_used_at,
+        }
+        for k in keys
+    ]
+
+
+@router.post("/api-keys", status_code=201, dependencies=[Depends(require_admin)])
+async def add_key(payload: ApiKeyCreate, db: AsyncSession = Depends(get_db)):
+    invalid = set(payload.permissions) - PERMISSIONS
+    if invalid:
+        raise HTTPException(422, f"Unknown permissions: {sorted(invalid)}")
+    raw, prefix, hashed = create_api_key()
+    key = ApiKey(
+        name=payload.name,
+        prefix=prefix,
+        key_hash=hashed,
+        permissions=payload.permissions,
+    )
+    db.add(key)
+    await db.commit()
+    await record_admin_audit(
+        db, "api_key.create", key.name, {"permissions": key.permissions}
+    )
+    return {
+        "id": key.id,
+        "name": key.name,
+        "key": raw,
+        "permissions": key.permissions,
+        "warning": "This key is shown only once.",
+    }
+
+
+@router.delete(
+    "/api-keys/{key_id}", status_code=204, dependencies=[Depends(require_admin)]
+)
+async def remove_key(key_id: int, db: AsyncSession = Depends(get_db)):
+    key = await db.get(ApiKey, key_id)
+    if not key:
+        raise HTTPException(404, "API key not found")
+    name = key.name
+    await db.delete(key)
+    await db.commit()
+    await record_admin_audit(db, "api_key.delete", name)
+
+
+@router.get("/logs", dependencies=[Depends(require_admin)])
+async def logs(
+    limit: int = 100,
+    tool: str | None = None,
+    account: str | None = None,
+    success: bool | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    query = (
+        select(OperationLog)
+        .order_by(OperationLog.timestamp.desc())
+        .limit(min(limit, 500))
+    )
+    if tool:
+        query = query.where(OperationLog.tool == tool)
+    if account:
+        query = query.where(OperationLog.account == account)
+    if success is not None:
+        query = query.where(OperationLog.success == success)
+    rows = (await db.scalars(query)).all()
+    return [
+        {
+            column.name: getattr(row, column.name)
+            for column in OperationLog.__table__.columns
+        }
+        for row in rows
+    ]
+
+
+@router.get("/audit", dependencies=[Depends(require_admin)])
+async def audit(limit: int = 100, db: AsyncSession = Depends(get_db)):
+    rows = (
+        await db.scalars(
+            select(AuditLog).order_by(AuditLog.timestamp.desc()).limit(min(limit, 500))
+        )
+    ).all()
+    return [
+        {
+            column.name: getattr(row, column.name)
+            for column in AuditLog.__table__.columns
+        }
+        for row in rows
+    ]
+
+
+async def tcp_check(host: str, port: int, tls: bool) -> dict:
+    started = asyncio.get_running_loop().time()
+    try:
+        context = ssl.create_default_context() if tls else None
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(
+                host, port, ssl=context, server_hostname=host if tls else None
+            ),
+            timeout=10,
+        )
+        cert = writer.get_extra_info("peercert")
+        writer.close()
+        await writer.wait_closed()
+        return {
+            "status": "ok",
+            "duration_ms": int((asyncio.get_running_loop().time() - started) * 1000),
+            "certificate": cert.get("notAfter") if cert else None,
+        }
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+@router.post("/diagnostics", dependencies=[Depends(require_admin)])
+async def diagnostics(
+    account_name: str | None = None,
+    repo: AccountRepository = Depends(repository),
+    settings: Settings = Depends(get_settings),
+):
+    checks = {
+        "database": {"status": "ok" if await check_database() else "error"},
+        "configuration": {
+            "status": "ok" if not settings.production_errors() else "warning",
+            "details": settings.production_errors(),
+        },
+        "filesystem": {"status": "ok" if Path("data").exists() else "warning"},
+        "mcp": {"status": "ok", "url": settings.mcp_url},
+    }
+    try:
+        account = await repo.get(account_name)
+        checks["dns_imap"] = {
+            "status": "ok",
+            "addresses": await asyncio.to_thread(
+                socket.gethostbyname_ex, account.imap_host
+            ),
+        }
+        checks["tcp_tls_imap"] = await tcp_check(
+            account.imap_host, account.imap_port, account.imap_ssl
+        )
+        checks["dns_smtp"] = {
+            "status": "ok",
+            "addresses": await asyncio.to_thread(
+                socket.gethostbyname_ex, account.smtp_host
+            ),
+        }
+        checks["tcp_tls_smtp"] = await tcp_check(
+            account.smtp_host, account.smtp_port, account.smtp_ssl
+        )
+        checks["imap_login_list"] = await MailService(
+            account, repo.cipher, settings
+        ).test()
+    except Exception as exc:
+        checks["mail_account"] = {"status": "error", "error": str(exc)}
+    return {
+        "success": all(v.get("status") != "error" for v in checks.values()),
+        "checks": checks,
+    }
+
+
+@router.get("/configuration", dependencies=[Depends(require_admin)])
+async def configuration(settings: Settings = Depends(get_settings)):
+    return {
+        "public_url": settings.public_url,
+        "mcp_path": settings.mcp_path,
+        "mcp_url": settings.mcp_url,
+        "allowed_hosts": settings.allowed_hosts,
+        "allowed_origins": settings.allowed_origins,
+        "trusted_proxies": settings.trusted_proxies,
+        "read_only": settings.read_only,
+        "attachment_download_enabled": settings.attachment_download_enabled,
+        "max_attachment_size_mb": settings.max_attachment_size_mb,
+        "attachment_save_dir": str(settings.attachment_save_dir),
+        "blocked_attachment_types": settings.blocked_attachment_types,
+        "max_request_size_mb": settings.max_request_size_mb,
+        "destructive_operations_enabled": settings.destructive_operations_enabled,
+        "secrets": {
+            "secret_key": "configured"
+            if settings.secret_key != "A_REMPLIR"
+            else "missing",
+            "encryption_key": "configured"
+            if settings.encryption_key != "A_REMPLIR"
+            else "missing",
+            "mcp_api_key": "configured"
+            if settings.mcp_api_key != "A_REMPLIR"
+            else "missing",
+        },
+    }

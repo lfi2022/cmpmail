@@ -1,0 +1,987 @@
+import email
+from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Any
+
+from mcp.server import MCPServer
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.audit import audit_event
+from app.auth import current_actor, current_permissions, current_request_meta
+from app.config import get_settings
+from app.database import SessionLocal
+from app.models import AuditLog, OperationLog
+from app.security import CredentialCipher, require_permission
+from app.services.accounts import AccountRepository, public_account
+from app.services.mail import MailService, failure, partial, plain_forward, result
+
+settings = get_settings()
+mcp = MCPServer(
+    "LFINFO Mail MCP",
+    instructions="Production IMAP/SMTP tools. UIDs are scoped to an account and canonical mailbox. Permanent-delete tools are destructive.",
+    version="1.0.0",
+)
+
+TOOL_PERMISSIONS = {
+    "list_accounts": "read",
+    "get_account": "read",
+    "test_account": "read",
+    "set_default_account": "admin",
+    "list_mailboxes": "read",
+    "get_mailbox": "read",
+    "resolve_mailbox": "read",
+    "create_mailbox": "folders",
+    "rename_mailbox": "folders",
+    "delete_mailbox": "folders",
+    "subscribe_mailbox": "folders",
+    "unsubscribe_mailbox": "folders",
+    "list_emails": "read",
+    "search_emails": "read",
+    "get_email": "read",
+    "get_emails": "read",
+    "get_email_headers": "read",
+    "get_raw_message": "read",
+    "get_thread": "read",
+    "get_conversation": "read",
+    "mark_read": "flags",
+    "mark_unread": "flags",
+    "add_flags": "flags",
+    "remove_flags": "flags",
+    "set_flags": "flags",
+    "star_email": "flags",
+    "unstar_email": "flags",
+    "move_email": "move",
+    "move_emails": "move",
+    "copy_email": "copy",
+    "copy_emails": "copy",
+    "archive_email": "move",
+    "archive_emails": "move",
+    "trash_email": "move",
+    "trash_emails": "move",
+    "restore_email": "move",
+    "restore_emails": "move",
+    "delete_email_permanently": "delete",
+    "delete_emails_permanently": "delete",
+    "create_draft": "send",
+    "update_draft": "send",
+    "delete_draft": "delete",
+    "send_draft": "send",
+    "send_email": "send",
+    "reply_email": "send",
+    "reply_all": "send",
+    "forward_email": "send",
+    "list_attachments": "attachments",
+    "download_attachment": "attachments",
+    "save_attachment": "attachments",
+}
+SENSITIVE = {
+    "send_email",
+    "reply_email",
+    "reply_all",
+    "forward_email",
+    "move_email",
+    "move_emails",
+    "trash_email",
+    "trash_emails",
+    "delete_email_permanently",
+    "delete_emails_permanently",
+    "delete_mailbox",
+    "set_default_account",
+}
+
+
+@asynccontextmanager
+async def service_for(account_name: str | None):
+    async with SessionLocal() as db:
+        cipher = CredentialCipher(settings.encryption_key)
+        repo = AccountRepository(db, cipher)
+        account = await repo.get(account_name)
+        if not account.enabled:
+            raise ValueError(f"Account is disabled: {account.name}")
+        yield db, repo, account, MailService(account, cipher, settings)
+
+
+async def execute(
+    tool: str,
+    account_name: str | None,
+    callback: Callable[
+        [AsyncSession, AccountRepository, Any, MailService], Awaitable[dict[str, Any]]
+    ],
+) -> dict[str, Any]:
+    started = datetime.now(timezone.utc)
+    actor = current_actor.get()
+    request_meta = current_request_meta.get()
+    success = False
+    error = None
+    output: dict[str, Any]
+    try:
+        require_permission(TOOL_PERMISSIONS[tool], current_permissions.get(), settings)
+        if tool == "list_accounts":
+            async with SessionLocal() as db:
+                repo = AccountRepository(db, CredentialCipher(settings.encryption_key))
+                output = await callback(db, repo, None, None)
+        else:
+            async with service_for(account_name) as (db, repo, account, service):
+                output = await callback(db, repo, account, service)
+                account_name = account.name
+        success = bool(output.get("success"))
+        error = "; ".join(output.get("errors", [])) or None
+    except Exception as exc:
+        error = str(getattr(exc, "detail", exc))
+        output = failure(error)
+    duration = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+    try:
+        async with SessionLocal() as log_db:
+            log_db.add(
+                OperationLog(
+                    tool=tool,
+                    account=account_name,
+                    actor=actor,
+                    ip=request_meta.get("ip"),
+                    user_agent=request_meta.get("user_agent"),
+                    mcp_session=request_meta.get("mcp_session"),
+                    duration_ms=duration,
+                    success=success,
+                    error=error,
+                )
+            )
+            if tool in SENSITIVE:
+                log_db.add(
+                    AuditLog(
+                        action=tool,
+                        actor=actor,
+                        account=account_name,
+                        target=None,
+                        details={},
+                        success=success,
+                    )
+                )
+                audit_event(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    action=tool,
+                    actor=actor,
+                    account=account_name,
+                    success=success,
+                )
+            await log_db.commit()
+    except Exception:
+        pass
+    return output
+
+
+@mcp.tool()
+async def list_accounts() -> dict[str, Any]:
+    """List configured mail accounts without credentials. Permission: read."""
+
+    async def action(db, repo, account, service):
+        return result([public_account(a) for a in await repo.list()])
+
+    return await execute("list_accounts", None, action)
+
+
+@mcp.tool()
+async def get_account(account_name: str | None = None) -> dict[str, Any]:
+    """Get one account (default when omitted), never secrets. Permission: read."""
+
+    async def action(db, repo, account, service):
+        return result(public_account(account))
+
+    return await execute("get_account", account_name, action)
+
+
+@mcp.tool()
+async def test_account(account_name: str | None = None) -> dict[str, Any]:
+    """Test IMAP authentication and LIST. Permission: read."""
+
+    async def action(db, repo, account, service):
+        return await service.test()
+
+    return await execute("test_account", account_name, action)
+
+
+@mcp.tool()
+async def set_default_account(account_name: str) -> dict[str, Any]:
+    """Set the default account. Sensitive; permission: admin."""
+
+    async def action(db, repo, account, service):
+        return result(public_account(await repo.set_default(account.name)))
+
+    return await execute("set_default_account", account_name, action)
+
+
+@mcp.tool()
+async def list_mailboxes(account_name: str | None = None) -> dict[str, Any]:
+    """List canonical IMAP mailboxes, real delimiters, flags and RFC 6154 special-use. Permission: read."""
+
+    async def action(db, repo, account, service):
+        return await service.list_mailboxes()
+
+    return await execute("list_mailboxes", account_name, action)
+
+
+@mcp.tool()
+async def resolve_mailbox(
+    mailbox: str, account_name: str | None = None
+) -> dict[str, Any]:
+    """Resolve an unambiguous friendly mailbox to its canonical IMAP name. Permission: read."""
+
+    async def action(db, repo, account, service):
+        return result(
+            {"input": mailbox, "canonical_name": await service.resolve_mailbox(mailbox)}
+        )
+
+    return await execute("resolve_mailbox", account_name, action)
+
+
+@mcp.tool()
+async def get_mailbox(mailbox: str, account_name: str | None = None) -> dict[str, Any]:
+    """Get mailbox metadata using canonical resolution. Permission: read."""
+
+    async def action(db, repo, account, service):
+        canonical = await service.resolve_mailbox(mailbox)
+        return result(
+            next(
+                m
+                for m in (await service.list_mailboxes())["data"]
+                if m["canonical_name"] == canonical
+            )
+        )
+
+    return await execute("get_mailbox", account_name, action)
+
+
+async def _folder(
+    tool: str,
+    account_name: str | None,
+    mailbox: str,
+    action_name: str,
+    target: str | None = None,
+):
+    async def action(db, repo, account, service):
+        return await service.folder_action(action_name, mailbox, target)
+
+    return await execute(tool, account_name, action)
+
+
+@mcp.tool()
+async def create_mailbox(
+    mailbox: str, account_name: str | None = None
+) -> dict[str, Any]:
+    """Create a mailbox. Mutating; permission: folders."""
+    return await _folder("create_mailbox", account_name, mailbox, "create_folder")
+
+
+@mcp.tool()
+async def rename_mailbox(
+    mailbox: str, new_canonical_name: str, account_name: str | None = None
+) -> dict[str, Any]:
+    """Rename a canonical mailbox. Mutating; permission: folders."""
+    return await _folder(
+        "rename_mailbox", account_name, mailbox, "rename_folder", new_canonical_name
+    )
+
+
+@mcp.tool()
+async def delete_mailbox(
+    mailbox: str, account_name: str | None = None
+) -> dict[str, Any]:
+    """Permanently delete a mailbox. Destructive; permission: folders."""
+    return await _folder("delete_mailbox", account_name, mailbox, "delete_folder")
+
+
+@mcp.tool()
+async def subscribe_mailbox(
+    mailbox: str, account_name: str | None = None
+) -> dict[str, Any]:
+    """Subscribe to an IMAP mailbox. Mutating; permission: folders."""
+    return await _folder("subscribe_mailbox", account_name, mailbox, "subscribe_folder")
+
+
+@mcp.tool()
+async def unsubscribe_mailbox(
+    mailbox: str, account_name: str | None = None
+) -> dict[str, Any]:
+    """Unsubscribe from an IMAP mailbox. Mutating; permission: folders."""
+    return await _folder(
+        "unsubscribe_mailbox", account_name, mailbox, "unsubscribe_folder"
+    )
+
+
+@mcp.tool()
+async def list_emails(
+    mailbox: str = "INBOX",
+    account_name: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+    since: str | None = None,
+    before: str | None = None,
+    sender: str | None = None,
+    to: str | None = None,
+    cc: str | None = None,
+    bcc: str | None = None,
+    subject: str | None = None,
+    body: str | None = None,
+    text: str | None = None,
+    seen: bool | None = None,
+    unseen: bool | None = None,
+    flagged: bool | None = None,
+    unflagged: bool | None = None,
+    answered: bool | None = None,
+    unanswered: bool | None = None,
+    draft: bool | None = None,
+    deleted: bool | None = None,
+    has_attachment: bool | None = None,
+    min_size: int | None = None,
+    max_size: int | None = None,
+    message_id: str | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+    sort: str = "date",
+    descending: bool = True,
+) -> dict[str, Any]:
+    """List/search mail with pagination. SUBJECT is partial, not equality. Permission: read."""
+
+    async def action(db, repo, account, service):
+        return await service.list_emails(
+            mailbox=mailbox,
+            page=page,
+            page_size=page_size,
+            since=since,
+            before=before,
+            sender=sender,
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            subject=subject,
+            body=body,
+            text=text,
+            seen=seen,
+            unseen=unseen,
+            flagged=flagged,
+            unflagged=unflagged,
+            answered=answered,
+            unanswered=unanswered,
+            draft=draft,
+            deleted=deleted,
+            has_attachment=has_attachment,
+            min_size=min_size,
+            max_size=max_size,
+            message_id=message_id,
+            in_reply_to=in_reply_to,
+            references=references,
+            sort=sort,
+            descending=descending,
+        )
+
+    return await execute("list_emails", account_name, action)
+
+
+@mcp.tool()
+async def search_emails(
+    mailbox: str = "INBOX",
+    account_name: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+    since: str | None = None,
+    before: str | None = None,
+    sender: str | None = None,
+    to: str | None = None,
+    cc: str | None = None,
+    bcc: str | None = None,
+    subject: str | None = None,
+    body: str | None = None,
+    text: str | None = None,
+    seen: bool | None = None,
+    unseen: bool | None = None,
+    flagged: bool | None = None,
+    unflagged: bool | None = None,
+    answered: bool | None = None,
+    unanswered: bool | None = None,
+    draft: bool | None = None,
+    deleted: bool | None = None,
+    has_attachment: bool | None = None,
+    min_size: int | None = None,
+    max_size: int | None = None,
+    message_id: str | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+    sort: str = "date",
+    descending: bool = True,
+) -> dict[str, Any]:
+    """Search email using combinable IMAP criteria. Permission: read."""
+
+    async def action(db, repo, account, service):
+        return await service.list_emails(
+            mailbox=mailbox,
+            page=page,
+            page_size=page_size,
+            since=since,
+            before=before,
+            sender=sender,
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            subject=subject,
+            body=body,
+            text=text,
+            seen=seen,
+            unseen=unseen,
+            flagged=flagged,
+            unflagged=unflagged,
+            answered=answered,
+            unanswered=unanswered,
+            draft=draft,
+            deleted=deleted,
+            has_attachment=has_attachment,
+            min_size=min_size,
+            max_size=max_size,
+            message_id=message_id,
+            in_reply_to=in_reply_to,
+            references=references,
+            sort=sort,
+            descending=descending,
+        )
+
+    return await execute("search_emails", account_name, action)
+
+
+@mcp.tool()
+async def get_email(
+    mailbox: str,
+    uid: int,
+    account_name: str | None = None,
+    offset: int = 0,
+    limit: int = 1_000_000,
+) -> dict[str, Any]:
+    """Read a message by account+mailbox+UID with body slicing. Permission: read."""
+
+    async def action(db, repo, account, service):
+        return await service.get_email(mailbox, uid, offset, limit)
+
+    return await execute("get_email", account_name, action)
+
+
+@mcp.tool()
+async def get_emails(
+    mailbox: str,
+    uids: list[int],
+    account_name: str | None = None,
+    offset: int = 0,
+    limit: int = 1_000_000,
+) -> dict[str, Any]:
+    """Read multiple messages; reports partial failures. Permission: read."""
+
+    async def action(db, repo, account, service):
+        values, errors = [], []
+        for uid in uids:
+            try:
+                values.append(
+                    (await service.get_email(mailbox, uid, offset, limit))["data"]
+                )
+            except Exception as exc:
+                errors.append(f"UID {uid}: {exc}")
+        return (
+            partial(values, len(values), len(errors), errors)
+            if errors
+            else result(values)
+        )
+
+    return await execute("get_emails", account_name, action)
+
+
+@mcp.tool()
+async def get_email_headers(
+    mailbox: str, uid: int, account_name: str | None = None
+) -> dict[str, Any]:
+    """Get parsed message headers without bodies. Permission: read."""
+
+    async def action(db, repo, account, service):
+        value = (await service.get_email(mailbox, uid, 0, 0))["data"]
+        value.pop("text", None)
+        value.pop("html", None)
+        value.pop("attachments", None)
+        return result(value)
+
+    return await execute("get_email_headers", account_name, action)
+
+
+@mcp.tool()
+async def get_raw_message(
+    mailbox: str, uid: int, account_name: str | None = None
+) -> dict[str, Any]:
+    """Get controlled base64 RFC822 source, subject to configured maximum. Permission: read."""
+
+    async def action(db, repo, account, service):
+        return await service.get_raw_message(mailbox, uid)
+
+    return await execute("get_raw_message", account_name, action)
+
+
+async def _conversation(tool: str, mailbox: str, uid: int, account_name: str | None):
+    async def action(db, repo, account, service):
+        root = (await service.get_email(mailbox, uid))["data"]
+        ids = set(
+            root["references"]
+            + [x for x in [root["message_id"], root["in_reply_to"]] if x]
+        )
+        candidates = (await service.list_emails(mailbox, 1, 500))["data"]
+        matches = []
+        for item in candidates:
+            if (
+                item["message_id"] in ids
+                or item["in_reply_to"] in ids
+                or ids.intersection(item["references"])
+            ):
+                matches.append((await service.get_email(mailbox, item["uid"]))["data"])
+        if root["uid"] not in [m["uid"] for m in matches]:
+            matches.append(root)
+        matches.sort(key=lambda m: m.get("date") or "")
+        return result(matches)
+
+    return await execute(tool, account_name, action)
+
+
+@mcp.tool()
+async def get_thread(
+    mailbox: str, uid: int, account_name: str | None = None
+) -> dict[str, Any]:
+    """Build a thread using Message-ID/In-Reply-To/References, never subject alone. Permission: read."""
+    return await _conversation("get_thread", mailbox, uid, account_name)
+
+
+@mcp.tool()
+async def get_conversation(
+    mailbox: str, uid: int, account_name: str | None = None
+) -> dict[str, Any]:
+    """Alias for reference-based thread retrieval. Permission: read."""
+    return await _conversation("get_conversation", mailbox, uid, account_name)
+
+
+async def _flags(
+    tool: str,
+    mailbox: str,
+    uids: list[int],
+    mode: str,
+    flags: list[str],
+    account_name: str | None,
+):
+    async def action(db, repo, account, service):
+        return await service.change_flags(mailbox, uids, mode, flags)
+
+    return await execute(tool, account_name, action)
+
+
+@mcp.tool()
+async def mark_read(mailbox: str, uid: int, account_name: str | None = None):
+    return await _flags(
+        "mark_read", mailbox, [uid], "add_flags", ["\\Seen"], account_name
+    )
+
+
+@mcp.tool()
+async def mark_unread(mailbox: str, uid: int, account_name: str | None = None):
+    return await _flags(
+        "mark_unread", mailbox, [uid], "remove_flags", ["\\Seen"], account_name
+    )
+
+
+@mcp.tool()
+async def star_email(mailbox: str, uid: int, account_name: str | None = None):
+    return await _flags(
+        "star_email", mailbox, [uid], "add_flags", ["\\Flagged"], account_name
+    )
+
+
+@mcp.tool()
+async def unstar_email(mailbox: str, uid: int, account_name: str | None = None):
+    return await _flags(
+        "unstar_email", mailbox, [uid], "remove_flags", ["\\Flagged"], account_name
+    )
+
+
+@mcp.tool()
+async def add_flags(
+    mailbox: str, uids: list[int], flags: list[str], account_name: str | None = None
+):
+    return await _flags("add_flags", mailbox, uids, "add_flags", flags, account_name)
+
+
+@mcp.tool()
+async def remove_flags(
+    mailbox: str, uids: list[int], flags: list[str], account_name: str | None = None
+):
+    return await _flags(
+        "remove_flags", mailbox, uids, "remove_flags", flags, account_name
+    )
+
+
+@mcp.tool()
+async def set_flags(
+    mailbox: str, uids: list[int], flags: list[str], account_name: str | None = None
+):
+    return await _flags("set_flags", mailbox, uids, "set_flags", flags, account_name)
+
+
+async def _transfer(
+    tool: str,
+    mailbox: str,
+    target: str,
+    uids: list[int],
+    move: bool,
+    account_name: str | None,
+):
+    async def action(db, repo, account, service):
+        return await service.move_or_copy(mailbox, target, uids, move)
+
+    return await execute(tool, account_name, action)
+
+
+@mcp.tool()
+async def move_email(
+    mailbox: str, target_mailbox: str, uid: int, account_name: str | None = None
+):
+    return await _transfer(
+        "move_email", mailbox, target_mailbox, [uid], True, account_name
+    )
+
+
+@mcp.tool()
+async def move_emails(
+    mailbox: str, target_mailbox: str, uids: list[int], account_name: str | None = None
+):
+    return await _transfer(
+        "move_emails", mailbox, target_mailbox, uids, True, account_name
+    )
+
+
+@mcp.tool()
+async def copy_email(
+    mailbox: str, target_mailbox: str, uid: int, account_name: str | None = None
+):
+    return await _transfer(
+        "copy_email", mailbox, target_mailbox, [uid], False, account_name
+    )
+
+
+@mcp.tool()
+async def copy_emails(
+    mailbox: str, target_mailbox: str, uids: list[int], account_name: str | None = None
+):
+    return await _transfer(
+        "copy_emails", mailbox, target_mailbox, uids, False, account_name
+    )
+
+
+async def _special(
+    tool: str, mailbox: str, uids: list[int], kind: str, account_name: str | None
+):
+    async def action(db, repo, account, service):
+        configured = getattr(account, f"{kind}_mailbox")
+        if not configured:
+            folders = (await service.list_mailboxes())["data"]
+            configured = next(
+                (m["canonical_name"] for m in folders if m["special_use"] == kind), None
+            )
+        if not configured:
+            return failure(f"{kind.title()} mailbox is not configured or advertised")
+        return await service.move_or_copy(mailbox, configured, uids, True)
+
+    return await execute(tool, account_name, action)
+
+
+@mcp.tool()
+async def archive_email(mailbox: str, uid: int, account_name: str | None = None):
+    return await _special("archive_email", mailbox, [uid], "archive", account_name)
+
+
+@mcp.tool()
+async def archive_emails(
+    mailbox: str, uids: list[int], account_name: str | None = None
+):
+    return await _special("archive_emails", mailbox, uids, "archive", account_name)
+
+
+@mcp.tool()
+async def trash_email(mailbox: str, uid: int, account_name: str | None = None):
+    return await _special("trash_email", mailbox, [uid], "trash", account_name)
+
+
+@mcp.tool()
+async def trash_emails(mailbox: str, uids: list[int], account_name: str | None = None):
+    return await _special("trash_emails", mailbox, uids, "trash", account_name)
+
+
+@mcp.tool()
+async def restore_email(
+    uid: int, target_mailbox: str = "INBOX", account_name: str | None = None
+):
+    async def action(db, repo, account, service):
+        trash = account.trash_mailbox or next(
+            (
+                m["canonical_name"]
+                for m in (await service.list_mailboxes())["data"]
+                if m["special_use"] == "trash"
+            ),
+            None,
+        )
+        if not trash:
+            return failure("Trash mailbox is not configured or advertised")
+        return await service.move_or_copy(trash, target_mailbox, [uid], True)
+
+    return await execute("restore_email", account_name, action)
+
+
+@mcp.tool()
+async def restore_emails(
+    uids: list[int], target_mailbox: str = "INBOX", account_name: str | None = None
+):
+    async def action(db, repo, account, service):
+        trash = account.trash_mailbox or next(
+            (
+                m["canonical_name"]
+                for m in (await service.list_mailboxes())["data"]
+                if m["special_use"] == "trash"
+            ),
+            None,
+        )
+        if not trash:
+            return failure("Trash mailbox is not configured or advertised")
+        return await service.move_or_copy(trash, target_mailbox, uids, True)
+
+    return await execute("restore_emails", account_name, action)
+
+
+@mcp.tool()
+async def delete_email_permanently(
+    mailbox: str, uid: int, account_name: str | None = None
+):
+    """EXPUNGE a message permanently. DESTRUCTIVE; permission: delete."""
+
+    async def action(db, repo, account, service):
+        return await service.permanent_delete(mailbox, [uid])
+
+    return await execute("delete_email_permanently", account_name, action)
+
+
+@mcp.tool()
+async def delete_emails_permanently(
+    mailbox: str, uids: list[int], account_name: str | None = None
+):
+    """EXPUNGE messages permanently. DESTRUCTIVE; permission: delete."""
+
+    async def action(db, repo, account, service):
+        return await service.permanent_delete(mailbox, uids)
+
+    return await execute("delete_emails_permanently", account_name, action)
+
+
+@mcp.tool()
+async def send_email(
+    to: list[str],
+    subject: str,
+    account_name: str | None = None,
+    text: str | None = None,
+    html: str | None = None,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
+    reply_to: str | None = None,
+    attachments: list[dict[str, str]] | None = None,
+    headers: dict[str, str] | None = None,
+):
+    """Send SMTP mail and APPEND the exact same Message-ID to Sent. Permission: send."""
+
+    async def action(db, repo, account, service):
+        return await service.send_email(
+            to, subject, text, html, cc, bcc, reply_to, attachments, headers
+        )
+
+    return await execute("send_email", account_name, action)
+
+
+async def _reply(
+    tool: str,
+    mailbox: str,
+    uid: int,
+    body: str,
+    reply_all_mode: bool,
+    account_name: str | None,
+):
+    async def action(db, repo, account, service):
+        original = (await service.get_email(mailbox, uid))["data"]
+        raw = (await service.get_raw_message(mailbox, uid))["data"]["raw"]
+        parent = email.message_from_bytes(__import__("base64").b64decode(raw))
+        from app.services.mail import build_reply_headers, reply_all_recipients
+
+        in_reply_to, references = build_reply_headers(parent)
+        if reply_all_mode:
+            to, cc = reply_all_recipients(parent, account.email)
+        else:
+            to, cc = (
+                [
+                    email.utils.parseaddr(parent.get("Reply-To") or parent.get("From"))[
+                        1
+                    ]
+                ],
+                [],
+            )
+        subject = (
+            original["subject"]
+            if original["subject"].lower().startswith("re:")
+            else f"Re: {original['subject']}"
+        )
+        return await service.send_email(
+            to,
+            subject,
+            body,
+            None,
+            cc,
+            None,
+            None,
+            None,
+            {"In-Reply-To": in_reply_to or "", "References": references},
+        )
+
+    return await execute(tool, account_name, action)
+
+
+@mcp.tool()
+async def reply_email(
+    mailbox: str, uid: int, text: str, account_name: str | None = None
+):
+    return await _reply("reply_email", mailbox, uid, text, False, account_name)
+
+
+@mcp.tool()
+async def reply_all(mailbox: str, uid: int, text: str, account_name: str | None = None):
+    return await _reply("reply_all", mailbox, uid, text, True, account_name)
+
+
+@mcp.tool()
+async def forward_email(
+    mailbox: str,
+    uid: int,
+    to: list[str],
+    account_name: str | None = None,
+    text: str = "",
+    include_attachments: bool = False,
+):
+    async def action(db, repo, account, service):
+        original = (await service.get_email(mailbox, uid))["data"]
+        subject = (
+            original["subject"]
+            if original["subject"].lower().startswith("fwd:")
+            else f"Fwd: {original['subject']}"
+        )
+        attachments = []
+        if include_attachments:
+            for attachment in original["attachments"]:
+                downloaded = await service.download_attachment(
+                    mailbox, uid, attachment["index"]
+                )
+                if not downloaded["success"]:
+                    return downloaded
+                item = downloaded["data"]
+                attachments.append(
+                    {
+                        "filename": item["filename"],
+                        "content_type": item["content_type"],
+                        "content_base64": item["content"],
+                    }
+                )
+        return await service.send_email(
+            to, subject, plain_forward(original, text), attachments=attachments
+        )
+
+    return await execute("forward_email", account_name, action)
+
+
+@mcp.tool()
+async def create_draft(
+    to: list[str],
+    subject: str,
+    account_name: str | None = None,
+    text: str = "",
+    html: str | None = None,
+):
+    async def action(db, repo, account, service):
+        return await service.create_draft(to, subject, text, html)
+
+    return await execute("create_draft", account_name, action)
+
+
+@mcp.tool()
+async def update_draft(
+    mailbox: str,
+    uid: int,
+    to: list[str],
+    subject: str,
+    account_name: str | None = None,
+    text: str = "",
+    html: str | None = None,
+):
+    async def action(db, repo, account, service):
+        created = await service.create_draft(to, subject, text, html)
+        if created["success"]:
+            await service.permanent_delete(mailbox, [uid])
+        return created
+
+    return await execute("update_draft", account_name, action)
+
+
+@mcp.tool()
+async def delete_draft(mailbox: str, uid: int, account_name: str | None = None):
+    async def action(db, repo, account, service):
+        return await service.permanent_delete(mailbox, [uid])
+
+    return await execute("delete_draft", account_name, action)
+
+
+@mcp.tool()
+async def send_draft(mailbox: str, uid: int, account_name: str | None = None):
+    async def action(db, repo, account, service):
+        draft = (await service.get_email(mailbox, uid))["data"]
+        sent = await service.send_email(
+            draft["recipients"],
+            draft["subject"],
+            draft["text"],
+            draft["html"],
+            draft["cc"],
+            draft["bcc"],
+            draft["reply_to"],
+        )
+        if sent["success"]:
+            await service.permanent_delete(mailbox, [uid])
+        return sent
+
+    return await execute("send_draft", account_name, action)
+
+
+@mcp.tool()
+async def list_attachments(mailbox: str, uid: int, account_name: str | None = None):
+    async def action(db, repo, account, service):
+        return await service.list_attachments(mailbox, uid)
+
+    return await execute("list_attachments", account_name, action)
+
+
+@mcp.tool()
+async def download_attachment(
+    mailbox: str, uid: int, index: int, account_name: str | None = None
+):
+    async def action(db, repo, account, service):
+        return await service.download_attachment(mailbox, uid, index)
+
+    return await execute("download_attachment", account_name, action)
+
+
+@mcp.tool()
+async def save_attachment(
+    mailbox: str, uid: int, index: int, account_name: str | None = None
+):
+    """Save into ATTACHMENT_SAVE_DIR with a sanitized filename. Arbitrary paths are forbidden. Permission: attachments."""
+
+    async def action(db, repo, account, service):
+        return await service.save_attachment(mailbox, uid, index)
+
+    return await execute("save_attachment", account_name, action)
