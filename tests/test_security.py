@@ -4,6 +4,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.config import Settings
+from app.middleware import content_security_policy
 from app.schemas import normalize_account_name
 from app.security import (
     CredentialCipher,
@@ -68,3 +69,11 @@ def test_permissions_block_ungranted():
 )
 def test_account_name_normalization(value, expected):
     assert normalize_account_name(value) == expected
+
+
+def test_csp_allows_registered_https_oauth_callback_redirects():
+    assert "form-action 'self' https:" in content_security_policy(
+        "/oauth/authorize"
+    )
+    assert "form-action 'self' https:" not in content_security_policy("/")
+    assert "default-src 'self'" in content_security_policy("/")

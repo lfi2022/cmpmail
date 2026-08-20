@@ -11,6 +11,24 @@ from app.auth import (
 )
 from app.config import Settings
 
+CONTENT_SECURITY_POLICY_BASE = (
+    "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; "
+    "img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'"
+)
+
+
+def content_security_policy(path: str) -> str:
+    # OAuth authorization POSTs finish with a redirect to an exactly
+    # registered client URI. CSP evaluates that redirect as part of the form
+    # action, so HTTPS must be allowed here; redirect validation remains the
+    # actual security boundary in app.oauth.
+    form_action = (
+        "'self' https: http://localhost:* http://127.0.0.1:*"
+        if path.startswith("/oauth/")
+        else "'self'"
+    )
+    return f"{CONTENT_SECURITY_POLICY_BASE}; form-action {form_action}"
+
 
 class SecurityMiddleware:
     """Pure ASGI middleware so MCP streaming is never buffered by BaseHTTPMiddleware."""
@@ -207,7 +225,7 @@ class SecurityMiddleware:
                         ),
                         (
                             b"content-security-policy",
-                            b"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+                            content_security_policy(path).encode(),
                         ),
                     ]
                 )

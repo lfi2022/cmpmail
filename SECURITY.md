@@ -12,6 +12,8 @@ Terminez TLS sur le reverse proxy `10.0.100.2`, transmettez un `Host` inchangé 
 
 Les endpoints `/.well-known/*`, `/oauth/*`, `/health`, `/ready`, `/version` et `/mcp` doivent parvenir sans authentification intermédiaire Cloudflare Access. Les règles WAF/rate-limit peuvent les protéger, mais ne doivent ni réécrire les paramètres OAuth ni mettre en cache les réponses de jetons. N'activez pas de contournement TLS entre le proxy et une origine non maîtrisée.
 
+La directive CSP `form-action` autorise les destinations HTTPS, car un consentement OAuth se termine nécessairement par une redirection vers le client. Cette permission CSP ne décide jamais de la destination : l'API OAuth exige toujours une correspondance exacte avec une URI préalablement enregistrée.
+
 ## Réponse à incident
 
 Révoquez le client ou la session dans l'interface, puis recherchez les événements `oauth.*` dans Audit. En cas de fuite de clé privée, générez une nouvelle paire, changez le `kid`, redémarrez, révoquez toutes les sessions et considérez tous les access tokens non expirés comme compromis. En cas de réutilisation de refresh token, la famille est automatiquement invalidée.
