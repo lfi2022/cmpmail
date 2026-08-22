@@ -46,6 +46,7 @@ class FacebookService:
         data: dict[str, Any] | None = None,
         files: dict[str, Any] | None = None,
         access_token: str | None = None,
+        debug_endpoint: str | None = None,
     ) -> dict[str, Any]:
         token = self._token(access_token)
         request_params = dict(params or {})
@@ -53,10 +54,14 @@ class FacebookService:
         for key in ("fields", "metric"):
             if key in request_params and isinstance(request_params[key], (list, tuple)):
                 request_params[key] = ",".join(str(v) for v in request_params[key])
+        
+        url = f"{self.api_base}/{path.lstrip('/')}"
+        endpoint_log = debug_endpoint or path or "unknown"
+        
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.request(
                 method=method.upper(),
-                url=f"{self.api_base}/{path.lstrip('/')}",
+                url=url,
                 params=request_params,
                 json=json_body,
                 data=data,
@@ -68,12 +73,27 @@ class FacebookService:
             payload = {"error": {"message": response.text}}
         if response.is_error:
             error = payload.get("error") if isinstance(payload, dict) else None
+            error_detail = {}
             message = ""
             if isinstance(error, dict):
                 message = error.get("message") or error.get("type") or "Facebook Graph API error"
+                error_detail = {
+                    "code": error.get("code"),
+                    "type": error.get("type"),
+                    "subcode": error.get("error_subcode"),
+                    "trace_id": error.get("fbtrace_id"),
+                }
             else:
                 message = str(payload)
-            raise FacebookAPIError(message)
+            error_msg = f"Facebook API error on {endpoint_log}: {message}"
+            if error_detail.get("code"):
+                error_msg += f" (code: {error_detail['code']}"
+                if error_detail.get("subcode"):
+                    error_msg += f", subcode: {error_detail['subcode']}"
+                if error_detail.get("trace_id"):
+                    error_msg += f", trace_id: {error_detail['trace_id']}"
+                error_msg += ")"
+            raise FacebookAPIError(error_msg)
         if not isinstance(payload, dict):
             return {"value": payload}
         return payload
@@ -202,26 +222,36 @@ class FacebookService:
         published: bool = True,
         access_token: str | None = None,
     ) -> dict[str, Any]:
-        form_data: dict[str, Any] = {"published": str(published).lower()}
-        if message:
-            form_data["message"] = message
-        if image_url:
-            form_data["url"] = image_url
+        if not image_url and not image_base64:
+            raise ValueError("Either image_url or image_base64 must be provided")
+        
         if image_base64:
             binary = base64.b64decode(image_base64)
             mime = image_mime_type or mimetypes.guess_type(image_filename)[0] or "image/jpeg"
             files = {"source": (image_filename, binary, mime)}
-            form_data.update({k: v for k, v in form_data.items() if v is not None})
+            form_data: dict[str, Any] = {}
+            if message:
+                form_data["message"] = message
+            form_data["published"] = "true" if published else "false"
             return await self._request(
                 "POST",
                 f"{page_id}/photos",
                 data=form_data,
                 files=files,
                 access_token=access_token,
+                debug_endpoint=f"{page_id}/photos (base64 upload)",
             )
-        if image_url:
-            return await self._request("POST", f"{page_id}/photos", data=form_data, access_token=access_token)
-        raise ValueError("Either image_url or image_base64 must be provided")
+        else:
+            form_data = {"url": image_url, "published": "true" if published else "false"}
+            if message:
+                form_data["message"] = message
+            return await self._request(
+                "POST",
+                f"{page_id}/photos",
+                data=form_data,
+                access_token=access_token,
+                debug_endpoint=f"{page_id}/photos (url)",
+            )
 
     async def delete_post(self, post_id: str, access_token: str | None = None) -> dict[str, Any]:
         return await self._request("DELETE", str(post_id), access_token=access_token)

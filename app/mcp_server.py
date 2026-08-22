@@ -203,6 +203,7 @@ async def execute(
 
 
 async def _resolve_facebook_user_token() -> str | None:
+    """Resolve a Facebook user token from configuration or DB."""
     configured = (settings.facebook_user_access_token or "").strip()
     if configured:
         return configured
@@ -218,6 +219,45 @@ async def _resolve_facebook_user_token() -> str | None:
         if token:
             return token
     return None
+
+
+async def _resolve_page_token_from_post_id(
+    post_id: str, user_token: str | None = None
+) -> tuple[str | None, str | None]:
+    """
+    Extract page_id from post_id format (PAGE_ID_POST_ID) and resolve the page access token.
+    Returns (page_access_token, page_id).
+    """
+    parts = str(post_id).split("_")
+    if len(parts) < 2:
+        return None, None
+    
+    page_id_candidate = parts[0]
+    user_token_to_use = user_token or await _resolve_facebook_user_token()
+    
+    if not user_token_to_use:
+        return None, page_id_candidate
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"https://graph.facebook.com/{settings.facebook_graph_api_version}/me/accounts",
+            params={
+                "access_token": user_token_to_use,
+                "fields": "id,name,access_token",
+            },
+        )
+        if response.is_error:
+            return None, page_id_candidate
+        payload = response.json()
+        pages = payload.get("data", []) if isinstance(payload, dict) else []
+        
+        for page in pages:
+            if str(page.get("id") or "") == str(page_id_candidate):
+                token = str(page.get("access_token") or "").strip()
+                if token:
+                    return token, page_id_candidate
+    
+    return None, page_id_candidate
 
 
 async def _resolve_facebook_token(
@@ -372,7 +412,16 @@ async def facebook_get_post(post_id: str, access_token: str | None = None) -> di
     """Get one Facebook Page post including metadata and comments summary. Permission: facebook.read."""
 
     async def action(service: FacebookService, page_id: str | None):
-        return await service.get_post(post_id, access_token=access_token)
+        if access_token:
+            return await service.get_post(post_id, access_token=access_token)
+        
+        user_token = await _resolve_facebook_user_token()
+        resolved_token, resolved_page_id = await _resolve_page_token_from_post_id(post_id, user_token)
+        
+        if not resolved_token:
+            return await service.get_post(post_id, access_token=None)
+        
+        return await service.get_post(post_id, access_token=resolved_token)
 
     return await _facebook_action("facebook_get_post", access_token=access_token, callback=action)
 
@@ -416,6 +465,8 @@ async def facebook_create_photo_post(
     access_token: str | None = None,
 ) -> dict[str, Any]:
     """Create a photo post on a Facebook Page. Permission: facebook.write."""
+    if not image_url and not image_base64:
+        return failure("Either image_url or image_base64 must be provided")
 
     async def action(service: FacebookService, resolved_page_id: str | None):
         target = page_id or resolved_page_id
@@ -440,7 +491,16 @@ async def facebook_delete_post(post_id: str, access_token: str | None = None) ->
     """Delete a Facebook Page post. Permission: facebook.write."""
 
     async def action(service: FacebookService, page_id: str | None):
-        return await service.delete_post(post_id, access_token=access_token)
+        if access_token:
+            return await service.delete_post(post_id, access_token=access_token)
+        
+        user_token = await _resolve_facebook_user_token()
+        resolved_token, resolved_page_id = await _resolve_page_token_from_post_id(post_id, user_token)
+        
+        if not resolved_token:
+            return await service.delete_post(post_id, access_token=None)
+        
+        return await service.delete_post(post_id, access_token=resolved_token)
 
     return await _facebook_action("facebook_delete_post", access_token=access_token, callback=action)
 
