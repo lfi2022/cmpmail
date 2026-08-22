@@ -104,6 +104,33 @@ async def test_mcp_temporary_file_uses_binary_source_and_deletes_after_post(tmp_
     assert not (tmp_path / stored["file_id"]).exists()
 
 
+@pytest.mark.asyncio
+async def test_multipart_upload_endpoint_uses_shared_storage(tmp_path, monkeypatch):
+    from app import main
+
+    settings = Settings(
+        _env_file=None,
+        mcp_auth_enabled=False,
+        temporary_upload_dir=tmp_path,
+        public_url="https://mcp.example",
+    )
+    monkeypatch.setattr(main, "settings", settings)
+    transport = httpx.ASGITransport(app=app)
+    image_bytes = base64.b64decode(_encoded_image("PNG"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
+        response = await client.post(
+            "/api/temp-media/upload",
+            files={"image_file": ("original.png", image_bytes, "image/png")},
+            data={"preserve_original": "true"},
+            headers={"Authorization": "Bearer test-upload-token"},
+        )
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["filename"] == "original.png"
+    assert payload["optimized"] is False
+    assert (tmp_path / payload["file_id"] / "original.png").read_bytes() == image_bytes
+
+
 def test_upload_accepts_data_uri_and_whitespace_wrapped_base64(tmp_path):
     settings = Settings(_env_file=None, temporary_upload_dir=tmp_path)
     stored = store_temporary_image(

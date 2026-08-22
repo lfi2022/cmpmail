@@ -158,9 +158,38 @@ def store_temporary_image(
     mime_type: str | None = None,
     preserve_original: bool = False,
 ) -> dict[str, Any]:
-    started = time.perf_counter()
     mime = str(mime_type or mimetypes.guess_type(str(filename or ""))[0] or "image/jpeg").lower()
-    binary, safe_name = _decode_image(settings, image_base64, mime, filename)
+    if mime not in SUPPORTED_IMAGE_MIME_TYPES:
+        raise ValueError("Supported image MIME types are JPEG, PNG, and WEBP")
+    encoded, _ = normalize_image_base64(image_base64)
+    if len(encoded.encode("ascii", errors="ignore")) > settings.temporary_upload_max_base64_bytes:
+        raise ValueError("image_base64 exceeds the configured upload limit")
+    try:
+        binary = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("image_base64 is not valid base64") from exc
+    if not binary:
+        raise ValueError("image_base64 must not be empty")
+    safe_name = _safe_filename(filename, mime)
+    return store_temporary_binary(settings, binary, safe_name, mime, preserve_original)
+
+
+def store_temporary_binary(
+    settings: Settings,
+    binary: bytes,
+    filename: str,
+    mime: str,
+    preserve_original: bool = False,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    if mime not in SUPPORTED_IMAGE_MIME_TYPES:
+        raise ValueError("Supported image MIME types are JPEG, PNG, and WEBP")
+    if not binary:
+        raise ValueError("image file is empty")
+    if len(binary) > settings.temporary_upload_max_bytes:
+        raise ValueError("image exceeds the configured upload limit")
+    validate_image_signature(binary, mime)
+    safe_name = _safe_filename(filename, mime)
     original_size = len(binary)
     binary, mime, safe_name, optimized = prepare_image_for_storage(
         settings, binary, mime, safe_name, preserve_original

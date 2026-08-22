@@ -4,8 +4,9 @@ import logging
 import mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -14,6 +15,7 @@ from sqlalchemy import func, select
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app import __version__
+from app.auth import authenticate_mcp
 from app.config import get_settings
 from app.database import SessionLocal, check_database
 from app.mcp_server import mcp
@@ -22,7 +24,13 @@ from app.models import MailAccount
 from app.oauth import bootstrap_oauth_user
 from app.oauth import router as oauth_router
 from app.routers.admin import router as admin_router
-from app.temp_media import cleanup_expired_uploads, resolve_temporary_image
+from app.security import require_permission
+from app.services.mail import result
+from app.temp_media import (
+    cleanup_expired_uploads,
+    resolve_temporary_image,
+    store_temporary_binary,
+)
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -171,6 +179,32 @@ async def temporary_media(file_id: str, filename: str):
             "Expires": "0",
         },
     )
+
+
+@app.post("/api/temp-media/upload", include_in_schema=False)
+async def upload_temporary_media(
+    request: Request,
+    image_file: Annotated[UploadFile, File(...)],
+    preserve_original: bool = False,
+):
+    _, permissions = await authenticate_mcp(request, settings)
+    require_permission("facebook.write", permissions, settings)
+    mime = (image_file.content_type or "").lower()
+    filename = image_file.filename or "image"
+    if mime not in {"image/jpeg", "image/png", "image/webp"}:
+        raise HTTPException(status_code=415, detail="Supported image MIME types are JPEG, PNG, and WEBP")
+    chunks = bytearray()
+    while True:
+        chunk = await image_file.read(1024 * 1024)
+        if not chunk:
+            break
+        chunks.extend(chunk)
+        if len(chunks) > settings.temporary_upload_max_bytes:
+            raise HTTPException(status_code=413, detail="image exceeds the configured upload limit")
+    try:
+        return result(store_temporary_binary(settings, bytes(chunks), filename, mime, preserve_original))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 app.mount(settings.mcp_path, mcp_asgi, name="mcp")

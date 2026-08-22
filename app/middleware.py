@@ -208,6 +208,10 @@ class SecurityMiddleware:
             path.startswith("/api/")
             and scope.get("method") in {"POST", "PUT", "PATCH", "DELETE"}
             and path not in {"/api/auth/login", "/api/auth/logout"}
+            and not (
+                path == "/api/temp-media/upload"
+                and (headers.get("authorization") or headers.get("x-api-key"))
+            )
         ):
             cookies = {}
             for pair in headers.get("cookie", "").split(";"):
