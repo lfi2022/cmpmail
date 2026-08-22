@@ -62,7 +62,10 @@ def prepare_image_for_storage(
     binary: bytes,
     mime_type: str,
     filename: str,
+    preserve_original: bool = False,
 ) -> tuple[bytes, str, str, bool]:
+    if preserve_original:
+        return binary, mime_type, filename, False
     try:
         from PIL import Image, ImageOps
 
@@ -153,13 +156,14 @@ def store_temporary_image(
     image_base64: str,
     filename: str | None = None,
     mime_type: str | None = None,
+    preserve_original: bool = False,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     mime = str(mime_type or mimetypes.guess_type(str(filename or ""))[0] or "image/jpeg").lower()
     binary, safe_name = _decode_image(settings, image_base64, mime, filename)
     original_size = len(binary)
     binary, mime, safe_name, optimized = prepare_image_for_storage(
-        settings, binary, mime, safe_name
+        settings, binary, mime, safe_name, preserve_original
     )
     token = secrets.token_urlsafe(32)
     directory = settings.temporary_upload_dir / token

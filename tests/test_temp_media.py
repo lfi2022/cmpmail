@@ -172,3 +172,26 @@ def test_large_image_is_resized_and_optimized(tmp_path):
     assert stored["optimized"] is True
     assert stored["stored_size"] < stored["original_size"]
     delete_temporary_image(settings, stored["file_id"])
+
+
+def test_preserve_original_keeps_source_bytes(tmp_path):
+    from io import BytesIO
+
+    settings = Settings(_env_file=None, temporary_upload_dir=tmp_path)
+    source = BytesIO()
+    Image.new("RGBA", (48, 32), (20, 40, 60, 255)).save(source, format="PNG")
+    original = source.getvalue()
+
+    stored = store_temporary_image(
+        settings,
+        base64.b64encode(original).decode(),
+        "original.png",
+        "image/png",
+        preserve_original=True,
+    )
+
+    path, _ = resolve_temporary_image(settings, stored["file_id"])
+    assert path.read_bytes() == original
+    assert stored["optimized"] is False
+    assert stored["original_size"] == stored["stored_size"] == len(original)
+    delete_temporary_image(settings, stored["file_id"])

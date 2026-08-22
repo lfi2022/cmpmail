@@ -439,8 +439,9 @@ async def upload_temporary_image(
     image_base64: str,
     filename: str | None = None,
     mime_type: str | None = None,
+    preserve_original: bool = False,
 ) -> dict[str, Any]:
-    """Upload a ChatGPT image for Facebook. Call this first, then pass data.file_id as temporary_file_id to facebook_create_photo_post. Permission: facebook.write."""
+    """Upload a ChatGPT image for Facebook. Set preserve_original=true to keep the exact source bytes without resizing or conversion. Then pass data.file_id as temporary_file_id to facebook_create_photo_post. Permission: facebook.write."""
     try:
         logger.debug(
             "temporary image received base64_length=%d filename=%s mime_type=%s",
@@ -449,7 +450,7 @@ async def upload_temporary_image(
             mime_type,
         )
         require_permission(TOOL_PERMISSIONS["upload_temporary_image"], current_permissions.get(), settings)
-        return result(store_temporary_image(settings, image_base64, filename, mime_type))
+        return result(store_temporary_image(settings, image_base64, filename, mime_type, preserve_original))
     except Exception as exc:
         return failure(redact_facebook_text(getattr(exc, "detail", exc)))
 
