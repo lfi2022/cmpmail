@@ -26,3 +26,17 @@ Variables essentielles :
 Après toute modification : `pm2 restart lfinfo-mail-mcp --update-env`.
 
 Les réglages réseau/de sécurité sont lus au démarrage : leur modification dans l'UI est volontairement informative, car une mutation à chaud fragiliserait le middleware actif. Les comptes et clés API sont modifiables en ligne.
+
+## Facebook Pages
+
+| Variable | Rôle |
+|---|---|
+| `FACEBOOK_APP_ID` | Identifiant de l'application Meta, utilisé uniquement côté serveur |
+| `FACEBOOK_APP_SECRET` | Secret Meta, uniquement dans `.env` |
+| `FACEBOOK_USER_ACCESS_TOKEN` | Fallback de déploiement ; privilégier l'échange depuis l'interface admin |
+| `FACEBOOK_DEFAULT_PAGE_ID` | Page utilisée quand `page_id` est omis |
+| `FACEBOOK_GRAPH_API_VERSION` | Version Graph API à utiliser, par exemple `v19.0` |
+
+L'interface admin reçoit un User Access Token courte durée, l'échange côté serveur contre un token longue durée via `fb_exchange_token`, puis stocke seulement sa version chiffrée avec `ENCRYPTION_KEY` et sa date d'expiration. Les Page Access Tokens sont récupérés dynamiquement via `/me/accounts` et ne sont jamais renvoyés par les APIs d'administration ou les tools MCP.
+
+Les scopes MCP requis sont `facebook.read`, `facebook.write` et `facebook.moderate`. Les permissions Meta correspondantes doivent être accordées à l'application et au compte administrateur de la Page. Certaines fonctionnalités, en particulier les notifications et les métriques Insights, dépendent de permissions et de métriques toujours disponibles dans la version Graph API configurée ; les erreurs Meta sont renvoyées explicitement sans faux succès.

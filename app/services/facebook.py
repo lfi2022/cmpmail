@@ -1,12 +1,130 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import mimetypes
+import re
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 from app.config import Settings
+
+
+PAGE_FIELDS = (
+    "id",
+    "name",
+    "username",
+    "about",
+    "description",
+    "category",
+    "category_list",
+    "link",
+    "website",
+    "phone",
+    "emails",
+    "fan_count",
+    "followers_count",
+    "picture{url}",
+    "cover",
+    "verification_status",
+)
+PAGE_LIST_FIELDS = (
+    "id",
+    "name",
+    "category",
+    "category_list",
+    "access_token",
+    "instagram_business_account",
+    "link",
+    "picture{url}",
+    "fan_count",
+)
+POST_FIELDS = (
+    "id",
+    "message",
+    "story",
+    "created_time",
+    "updated_time",
+    "permalink_url",
+    "is_published",
+    "status_type",
+    "attachments{media_type,media,subattachments}",
+)
+COMMENT_FIELDS = (
+    "id",
+    "message",
+    "created_time",
+    "from{id,name,picture}",
+    "like_count",
+    "comment_count",
+    "attachment",
+    "can_hide",
+    "is_hidden",
+)
+NOTIFICATION_FIELDS = (
+    "id",
+    "created_time",
+    "updated_time",
+    "title",
+    "link",
+    "unread",
+    "application{id,name}",
+    "from{id,name}",
+    "object{id,application}",
+)
+_SECRET_FIELDS = {
+    "access_token",
+    "app_secret",
+    "client_secret",
+    "authorization",
+    "refresh_token",
+}
+_PAGE_ID_PATTERN = re.compile(r"^\d+$")
+_OBJECT_ID_PATTERN = re.compile(r"^\d+(?:_\d+)?$")
+_SUPPORTED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+_MAX_PHOTO_BYTES = 10 * 1024 * 1024
+
+
+def redact_facebook_data(value: Any) -> Any:
+    """Remove credential-bearing fields and tokenized pagination URLs."""
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if key.lower() in _SECRET_FIELDS:
+                continue
+            if key == "next" and isinstance(item, str) and "access_token=" in item:
+                continue
+            redacted[key] = redact_facebook_data(item)
+        return redacted
+    if isinstance(value, list):
+        return [redact_facebook_data(item) for item in value]
+    return value
+
+
+def redact_facebook_text(value: object) -> str:
+    """Redact credential-like fragments that may appear in upstream errors."""
+    text = str(value)
+    text = re.sub(r"(?i)(access_token|client_secret|app_secret)=([^&\s]+)", r"\1=[REDACTED]", text)
+    return re.sub(r"\bEAA[A-Za-z0-9_-]+", "[REDACTED]", text)
+
+
+def validate_facebook_id(value: str, *, page: bool = False) -> str:
+    """Validate Graph object IDs without ever coercing them to a number."""
+    identifier = str(value or "").strip()
+    pattern = _PAGE_ID_PATTERN if page else _OBJECT_ID_PATTERN
+    if not pattern.fullmatch(identifier):
+        raise ValueError("Facebook IDs must be numeric strings or PAGE_ID_OBJECT_ID")
+    return identifier
+
+
+def validate_image_url(value: str) -> str:
+    url = str(value or "").strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("image_url must be an absolute HTTP(S) URL")
+    return url
 
 
 class FacebookAPIError(RuntimeError):
@@ -58,15 +176,24 @@ class FacebookService:
         url = f"{self.api_base}/{path.lstrip('/')}"
         endpoint_log = debug_endpoint or path or "unknown"
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.request(
-                method=method.upper(),
-                url=url,
-                params=request_params,
-                json=json_body,
-                data=data,
-                files=files,
-            )
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+                for attempt in range(2):
+                    response = await client.request(
+                        method=method.upper(),
+                        url=url,
+                        params=request_params,
+                        json=json_body,
+                        data=data,
+                        files=files,
+                    )
+                    if response.status_code not in {429, 500, 502, 503, 504} or attempt:
+                        break
+                    await asyncio.sleep(0.25)
+        except httpx.RequestError as exc:
+            raise FacebookAPIError(
+                f"Facebook API request failed on {endpoint_log}: {exc.__class__.__name__}"
+            ) from exc
         try:
             payload = response.json()
         except ValueError:
@@ -95,49 +222,36 @@ class FacebookService:
                 error_msg += ")"
             raise FacebookAPIError(error_msg)
         if not isinstance(payload, dict):
-            return {"value": payload}
-        return payload
+            return {"value": redact_facebook_data(payload)}
+        return redact_facebook_data(payload)
 
     async def list_pages(self, access_token: str | None = None) -> dict[str, Any]:
         return await self._request(
             "GET",
             "me/accounts",
             params={
-                "fields": [
-                    "id",
-                    "name",
-                    "category",
-                    "category_list",
-                    "access_token",
-                    "instagram_business_account",
-                    "link",
-                    "picture{url}",
-                    "fan_count",
-                ]
+                "fields": PAGE_LIST_FIELDS
             },
             access_token=access_token,
         )
 
     async def get_page(self, page_id: str, access_token: str | None = None) -> dict[str, Any]:
-        return await self._request(
-            "GET",
-            str(page_id),
-            params={
-                "fields": [
-                    "id",
-                    "name",
-                    "username",
-                    "about",
-                    "category",
-                    "link",
-                    "picture{url}",
-                    "fan_count",
-                    "followers_count",
-                    "created_time",
-                ]
-            },
-            access_token=access_token,
-        )
+        target = validate_facebook_id(page_id, page=True)
+        try:
+            return await self._request(
+                "GET", target, params={"fields": PAGE_FIELDS}, access_token=access_token
+            )
+        except FacebookAPIError as exc:
+            if "nonexisting field" not in str(exc).lower():
+                raise
+            # Meta rejects a complete fields request when one optional field is
+            # unavailable for an app/token combination. Preserve core reading.
+            return await self._request(
+                "GET",
+                target,
+                params={"fields": ("id", "name", "category", "link", "picture{url}")},
+                access_token=access_token,
+            )
 
     async def list_posts(
         self,
@@ -148,41 +262,24 @@ class FacebookService:
         until: str | None = None,
         access_token: str | None = None,
     ) -> dict[str, Any]:
+        target = validate_facebook_id(page_id, page=True)
         params: dict[str, Any] = {
-            "fields": [
-                "id",
-                "message",
-                "story",
-                "created_time",
-                "updated_time",
-                "permalink_url",
-                "is_published",
-                "status_type",
-                "attachments{media_type,media,subattachments}",
-            ],
+            "fields": POST_FIELDS,
             "limit": max(1, min(limit, 100)),
         }
         if since:
             params["since"] = since
         if until:
             params["until"] = until
-        return await self._request("GET", f"{page_id}/posts", params=params, access_token=access_token)
+        return await self._request("GET", f"{target}/posts", params=params, access_token=access_token)
 
     async def get_post(self, post_id: str, access_token: str | None = None) -> dict[str, Any]:
         return await self._request(
             "GET",
-            str(post_id),
+            validate_facebook_id(post_id),
             params={
                 "fields": [
-                    "id",
-                    "message",
-                    "story",
-                    "created_time",
-                    "updated_time",
-                    "permalink_url",
-                    "is_published",
-                    "status_type",
-                    "attachments{media_type,media,subattachments}",
+                    *POST_FIELDS,
                     "from{id,name}",
                     "comments.summary(true)",
                     "reactions.summary(true)",
@@ -201,6 +298,11 @@ class FacebookService:
         scheduled_publish_time: str | None = None,
         access_token: str | None = None,
     ) -> dict[str, Any]:
+        target = validate_facebook_id(page_id, page=True)
+        if not message and not link:
+            raise ValueError("message or link is required")
+        if scheduled_publish_time and published:
+            raise ValueError("scheduled_publish_time requires published=false")
         body: dict[str, Any] = {"published": str(published).lower()}
         if message is not None:
             body["message"] = message
@@ -208,7 +310,7 @@ class FacebookService:
             body["link"] = link
         if scheduled_publish_time is not None:
             body["scheduled_publish_time"] = scheduled_publish_time
-        return await self._request("POST", f"{page_id}/feed", json_body=body, access_token=access_token)
+        return await self._request("POST", f"{target}/feed", json_body=body, access_token=access_token)
 
     async def create_photo_post(
         self,
@@ -222,12 +324,22 @@ class FacebookService:
         published: bool = True,
         access_token: str | None = None,
     ) -> dict[str, Any]:
+        if bool(image_url) == bool(image_base64):
+            raise ValueError("Provide exactly one of image_url or image_base64")
+        target = validate_facebook_id(page_id, page=True)
         if not image_url and not image_base64:
             raise ValueError("Either image_url or image_base64 must be provided")
         
         if image_base64:
-            binary = base64.b64decode(image_base64)
+            try:
+                binary = base64.b64decode(image_base64, validate=True)
+            except ValueError as exc:
+                raise ValueError("image_base64 is not valid base64") from exc
+            if len(binary) > _MAX_PHOTO_BYTES:
+                raise ValueError("image_base64 exceeds the 10 MiB upload limit")
             mime = image_mime_type or mimetypes.guess_type(image_filename)[0] or "image/jpeg"
+            if mime not in _SUPPORTED_IMAGE_MIME_TYPES:
+                raise ValueError("Supported image MIME types are JPEG, PNG, and WEBP")
             files = {"source": (image_filename, binary, mime)}
             form_data: dict[str, Any] = {}
             if message:
@@ -235,26 +347,28 @@ class FacebookService:
             form_data["published"] = "true" if published else "false"
             return await self._request(
                 "POST",
-                f"{page_id}/photos",
+                f"{target}/photos",
                 data=form_data,
                 files=files,
                 access_token=access_token,
-                debug_endpoint=f"{page_id}/photos (base64 upload)",
+                debug_endpoint=f"{target}/photos (base64 upload)",
             )
         else:
-            form_data = {"url": image_url, "published": "true" if published else "false"}
+            form_data = {"url": validate_image_url(image_url), "published": "true" if published else "false"}
             if message:
                 form_data["message"] = message
             return await self._request(
                 "POST",
-                f"{page_id}/photos",
+                f"{target}/photos",
                 data=form_data,
                 access_token=access_token,
-                debug_endpoint=f"{page_id}/photos (url)",
+                debug_endpoint=f"{target}/photos (url)",
             )
 
     async def delete_post(self, post_id: str, access_token: str | None = None) -> dict[str, Any]:
-        return await self._request("DELETE", str(post_id), access_token=access_token)
+        target = validate_facebook_id(post_id)
+        response = await self._request("DELETE", target, access_token=access_token)
+        return {"deleted": bool(response.get("success")), "post_id": target}
 
     async def get_comments(
         self,
@@ -265,19 +379,9 @@ class FacebookService:
     ) -> dict[str, Any]:
         return await self._request(
             "GET",
-            f"{object_id}/comments",
+            f"{validate_facebook_id(object_id)}/comments",
             params={
-                "fields": [
-                    "id",
-                    "message",
-                    "created_time",
-                    "from{id,name,picture}",
-                    "like_count",
-                    "comment_count",
-                    "attachment",
-                    "can_hide",
-                    "is_hidden",
-                ],
+                "fields": COMMENT_FIELDS,
                 "limit": max(1, min(limit, 100)),
                 "order": "chronological",
             },
@@ -293,7 +397,7 @@ class FacebookService:
     ) -> dict[str, Any]:
         return await self._request(
             "POST",
-            f"{comment_id}/comments",
+            f"{validate_facebook_id(comment_id)}/comments",
             json_body={"message": message},
             access_token=access_token,
         )
@@ -307,7 +411,7 @@ class FacebookService:
     ) -> dict[str, Any]:
         return await self._request(
             "POST",
-            str(comment_id),
+            validate_facebook_id(comment_id),
             json_body={"is_hidden": bool(hidden)},
             access_token=access_token,
         )
@@ -322,20 +426,18 @@ class FacebookService:
         until: str | None = None,
         access_token: str | None = None,
     ) -> dict[str, Any]:
+        target = validate_facebook_id(page_id, page=True)
+        if metric is None:
+            raise ValueError("metric is required; Meta insight availability depends on the Page and API version")
         params: dict[str, Any] = {
             "period": period,
-            "metric": metric or [
-                "page_impressions",
-                "page_engaged_users",
-                "post_engagements",
-                "page_posts_impressions",
-            ],
+            "metric": metric,
         }
         if since:
             params["since"] = since
         if until:
             params["until"] = until
-        return await self._request("GET", f"{page_id}/insights", params=params, access_token=access_token)
+        return await self._request("GET", f"{target}/insights", params=params, access_token=access_token)
 
     async def get_notifications(
         self,
@@ -345,19 +447,9 @@ class FacebookService:
         limit: int = 25,
         access_token: str | None = None,
     ) -> dict[str, Any]:
-        endpoint = f"{page_id}/notifications" if page_id else "me/notifications"
+        endpoint = f"{validate_facebook_id(page_id, page=True)}/notifications" if page_id else "me/notifications"
         params: dict[str, Any] = {
-            "fields": [
-                "id",
-                "created_time",
-                "updated_time",
-                "title",
-                "link",
-                "unread",
-                "application{id,name}",
-                "from{id,name}",
-                "object{id,application}",
-            ],
+            "fields": NOTIFICATION_FIELDS,
             "limit": max(1, min(limit, 100)),
         }
         if unread_only:

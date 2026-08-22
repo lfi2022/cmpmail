@@ -1,6 +1,4 @@
 """Facebook User Access Token management with automatic exchange and renewal."""
-import base64
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -10,6 +8,7 @@ import httpx
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import SystemSetting
+from app.security import CredentialCipher
 from app.services.facebook import FacebookAPIError
 
 logger = logging.getLogger(__name__)
@@ -23,6 +22,10 @@ class FacebookTokenManager:
 
     def __init__(self, settings=None):
         self.settings = settings or get_settings()
+
+    @property
+    def _cipher(self) -> CredentialCipher:
+        return CredentialCipher(self.settings.encryption_key)
 
     async def exchange_short_lived_token(self, short_token: str) -> tuple[str, datetime]:
         """
@@ -95,7 +98,7 @@ class FacebookTokenManager:
         expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in or 5184000)  # 60 days default
         await self._store_token(access_token, expiry)
 
-        logger.info(f"Successfully exchanged short-lived token. Expiry: {expiry.isoformat()}")
+        logger.info("Successfully exchanged Facebook user token; expiry=%s", expiry.isoformat())
         return access_token, expiry
 
     async def get_long_lived_token(self) -> tuple[str | None, datetime | None]:
@@ -106,12 +109,22 @@ class FacebookTokenManager:
             Tuple of (token, expiry) or (None, None) if not available
         """
         stored = await self._load_token_data()
-        if stored and stored.get("token"):
-            token = str(stored.get("token", "")).strip()
+        if stored and (stored.get("encrypted_token") or stored.get("token")):
+            encrypted_token = str(stored.get("encrypted_token") or "").strip()
+            legacy_plaintext = not encrypted_token
+            token = (
+                self._cipher.decrypt(encrypted_token)
+                if encrypted_token
+                else str(stored.get("token", "")).strip()
+            )
             expiry_str = stored.get("expiry")
             if token and expiry_str:
                 try:
                     expiry = datetime.fromisoformat(expiry_str)
+                    if expiry.tzinfo is None:
+                        expiry = expiry.replace(tzinfo=timezone.utc)
+                    if legacy_plaintext:
+                        await self._store_token(token, expiry)
                     return token, expiry
                 except ValueError:
                     logger.warning("Invalid expiry format in stored token data")
@@ -181,7 +194,7 @@ class FacebookTokenManager:
                 setting = SystemSetting(key=self.STORAGE_KEY)
 
             setting.value = {
-                "token": token,
+                "encrypted_token": self._cipher.encrypt(token),
                 "expiry": expiry.isoformat(),
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_updated": datetime.now(timezone.utc).isoformat(),

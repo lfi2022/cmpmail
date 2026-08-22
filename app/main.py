@@ -1,4 +1,5 @@
 import contextlib
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from app.oauth import bootstrap_oauth_user, router as oauth_router
 from app.routers.admin import router as admin_router
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 transport_hosts = list(
     dict.fromkeys(
         settings.allowed_hosts
@@ -76,6 +78,13 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
 app.add_middleware(SecurityMiddleware, settings=settings)
 app.include_router(admin_router)
 app.include_router(oauth_router)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception(request, exc: Exception):
+    """Keep unexpected HTTP failures isolated without logging request secrets."""
+    logger.exception("Unhandled request failure method=%s path=%s", request.method, request.url.path)
+    return JSONResponse({"detail": "Internal server error"}, status_code=500)
 
 
 @app.get("/health")

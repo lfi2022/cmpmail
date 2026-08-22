@@ -16,7 +16,7 @@ from app.database import SessionLocal
 from app.models import AuditLog, OperationLog, SystemSetting
 from app.security import CredentialCipher, require_permission
 from app.services.accounts import AccountRepository, public_account
-from app.services.facebook import FacebookAPIError, FacebookService
+from app.services.facebook import FacebookAPIError, FacebookService, redact_facebook_text
 from app.services.facebook_token_manager import FacebookTokenManager
 from app.services.mail import MailService, failure, partial, plain_forward, result
 
@@ -90,6 +90,7 @@ TOOL_PERMISSIONS = {
     "facebook_hide_comment": "facebook.moderate",
     "facebook_get_insights": "facebook.read",
     "facebook_get_notifications": "facebook.read",
+    "facebook_health_check": "facebook.read",
 }
 
 # Convert the legacy capability names into explicit OAuth scopes. Keeping the
@@ -205,28 +206,16 @@ async def execute(
 
 async def _resolve_facebook_user_token() -> str | None:
     """Resolve a Facebook user token (prefer long-lived from DB)."""
-    # Priority 1: Long-lived token from token manager
     token_mgr = FacebookTokenManager()
     long_lived_token, expiry = await token_mgr.get_long_lived_token()
-    if long_lived_token and expiry:
+    if long_lived_token and expiry and expiry > datetime.now(timezone.utc):
         return long_lived_token
 
-    # Priority 2: Short-lived token from config (legacy/fallback)
+    # Deployment-only fallback. The frontend exchange endpoint persists only
+    # the long-lived replacement and takes precedence above.
     configured = (settings.facebook_user_access_token or "").strip()
     if configured:
         return configured
-
-    # Priority 3: Tokens from DB (legacy profile storage)
-    async with SessionLocal() as db:
-        stored = await db.get(SystemSetting, "facebook_accounts")
-        accounts: list[dict[str, Any]] = []
-        if stored and isinstance(stored.value, dict):
-            accounts = stored.value.get("accounts", []) or []
-
-    for profile in accounts:
-        token = str(profile.get("user_access_token") or "").strip()
-        if token:
-            return token
     return None
 
 
@@ -288,7 +277,9 @@ async def _resolve_facebook_token(
                 },
             )
             if response.is_error:
-                return user_candidate, page_id or settings.facebook_default_page_id
+                if page_id or settings.facebook_default_page_id:
+                    raise FacebookAPIError("Unable to resolve a Page access token from /me/accounts")
+                return user_candidate, None
             payload = response.json()
             pages = payload.get("data", []) if isinstance(payload, dict) else []
             if isinstance(pages, list) and pages:
@@ -310,47 +301,11 @@ async def _resolve_facebook_token(
                 page_key = str(first_page.get("id") or "").strip()
                 if token:
                     return token, page_key or page_id or settings.facebook_default_page_id
-        return user_candidate, page_id or settings.facebook_default_page_id
+        if page_id or settings.facebook_default_page_id:
+            raise FacebookAPIError("No Page access token is available for the requested page")
+        return user_candidate, None
 
-    async with SessionLocal() as db:
-        stored = await db.get(SystemSetting, "facebook_accounts")
-        accounts: list[dict[str, Any]] = []
-        if stored and isinstance(stored.value, dict):
-            accounts = stored.value.get("accounts", []) or []
-
-    if not accounts:
-        return settings.facebook_page_access_token, page_id or settings.facebook_default_page_id
-
-    if page_id:
-        for profile in accounts:
-            profile_pages = profile.get("pages") or []
-            for page in profile_pages:
-                if str(page.get("id") or "") == str(page_id):
-                    token = page.get("access_token") or profile.get("page_access_token") or ""
-                    return str(token) if token else None, page_id
-
-    for profile in accounts:
-        profile_default_page_id = str(profile.get("default_page_id") or "").strip()
-        if profile_default_page_id and (not page_id or profile_default_page_id == str(page_id)):
-            token = profile.get("page_access_token") or ""
-            return str(token) if token else None, profile_default_page_id
-
-        for page in profile.get("pages") or []:
-            if page.get("default"):
-                token = page.get("access_token") or profile.get("page_access_token") or ""
-                page_key = str(page.get("id") or "").strip()
-                return (str(token) if token else None, page_key)
-
-    first_profile = accounts[0]
-    first_token = first_profile.get("page_access_token") or ""
-    pages = first_profile.get("pages") or []
-    if pages:
-        first_page = pages[0]
-        return (
-            str(first_page.get("access_token") or first_token) if (first_page.get("access_token") or first_token) else None,
-            str(first_page.get("id") or "") if first_page.get("id") else None,
-        )
-    return (str(first_token) if first_token else None, first_profile.get("default_page_id"))
+    return settings.facebook_page_access_token, page_id or settings.facebook_default_page_id
 
 
 async def _facebook_action(
@@ -370,7 +325,7 @@ async def _facebook_action(
         output = await callback(service, resolved_page_id)
         return result(output)
     except Exception as exc:
-        return failure(str(getattr(exc, "detail", exc)))
+        return failure(redact_facebook_text(getattr(exc, "detail", exc)))
 
 
 @mcp.tool()
@@ -590,6 +545,52 @@ async def facebook_get_notifications(
         return await service.get_notifications(page_id=target, unread_only=unread_only, limit=limit, access_token=access_token)
 
     return await _facebook_action("facebook_get_notifications", access_token=access_token, page_id=page_id, callback=action)
+
+
+@mcp.tool()
+async def facebook_health_check(page_id: str | None = None) -> dict[str, Any]:
+    """Check Facebook configuration and read access without creating or changing content. Permission: facebook.read."""
+    try:
+        require_permission("facebook.read", current_permissions.get(), settings)
+        user_token = await _resolve_facebook_user_token()
+        configured_page_id = page_id or settings.facebook_default_page_id
+        health: dict[str, Any] = {
+            "configured": bool(settings.facebook_app_id and settings.facebook_app_secret),
+            "user_token_configured": bool(user_token),
+            "default_page_id": configured_page_id,
+            "read": False,
+            "write_permissions_detected": False,
+            "warnings": [],
+        }
+        if not user_token:
+            health["warnings"].append("No Facebook user token is configured")
+            return result(health)
+
+        service = FacebookService(settings, user_token)
+        pages = await service.list_pages(access_token=user_token)
+        available_pages = pages.get("data", [])
+        selected_page = next(
+            (item for item in available_pages if str(item.get("id")) == str(configured_page_id)),
+            None,
+        )
+        if not selected_page:
+            health["warnings"].append("Configured page is not accessible to the current user token")
+            return result(health)
+
+        health["default_page_name"] = selected_page.get("name")
+        page_token, resolved_page_id = await _resolve_facebook_token(page_id=str(selected_page["id"]))
+        if not page_token or not resolved_page_id:
+            health["warnings"].append("No Page access token could be resolved")
+            return result(health)
+
+        await FacebookService(settings, page_token).get_page(resolved_page_id)
+        health["read"] = True
+        health["warnings"].append(
+            "Write permission is confirmed only when Meta accepts a write operation"
+        )
+        return result(health)
+    except Exception as exc:
+        return failure(redact_facebook_text(getattr(exc, "detail", exc)))
 
 
 @mcp.tool()

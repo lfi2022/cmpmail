@@ -439,6 +439,26 @@ async def diagnostics(
     }
 
 
+def _public_facebook_profile(profile: object) -> dict:
+    """Return Facebook profile metadata only; credentials remain server-side."""
+    item = profile if isinstance(profile, dict) else {}
+    pages = item.get("pages") or []
+    return {
+        "id": str(item.get("id") or ""),
+        "label": str(item.get("label") or "Facebook"),
+        "default_page_id": str(item.get("default_page_id") or ""),
+        "pages": [
+            {
+                "id": str(page.get("id") or ""),
+                "name": str(page.get("name") or ""),
+                "default": bool(page.get("default")),
+            }
+            for page in pages
+            if isinstance(page, dict)
+        ],
+    }
+
+
 @router.get("/configuration", dependencies=[Depends(require_admin)])
 async def configuration(
     settings: Settings = Depends(get_settings),
@@ -447,7 +467,7 @@ async def configuration(
     stored = await db.get(SystemSetting, "facebook_accounts")
     accounts = []
     if stored and isinstance(stored.value, dict):
-        accounts = stored.value.get("accounts", [])
+        accounts = [_public_facebook_profile(item) for item in stored.value.get("accounts", [])]
     return {
         "public_url": settings.public_url,
         "mcp_path": settings.mcp_path,
@@ -493,7 +513,7 @@ async def facebook_config(db: AsyncSession = Depends(get_db)):
     stored = await db.get(SystemSetting, "facebook_accounts")
     accounts = []
     if stored and isinstance(stored.value, dict):
-        accounts = stored.value.get("accounts", [])
+        accounts = [_public_facebook_profile(item) for item in stored.value.get("accounts", [])]
     return {"accounts": accounts}
 
 
@@ -513,16 +533,11 @@ async def save_facebook_config(
             {
                 "id": str(item.get("id") or item.get("label") or f"facebook-{len(normalized)}"),
                 "label": str(item.get("label") or "Facebook"),
-                "app_id": str(item.get("app_id") or ""),
-                "app_secret": str(item.get("app_secret") or ""),
-                "user_access_token": str(item.get("user_access_token") or ""),
-                "page_access_token": str(item.get("page_access_token") or ""),
                 "default_page_id": str(item.get("default_page_id") or ""),
                 "pages": [
                     {
                         "id": str(page.get("id") or ""),
                         "name": str(page.get("name") or ""),
-                        "access_token": str(page.get("access_token") or ""),
                         "default": bool(page.get("default")),
                     }
                     for page in (item.get("pages") or [])
@@ -538,7 +553,7 @@ async def save_facebook_config(
     db.add(setting)
     await db.commit()
     await record_admin_audit(db, "facebook.config.saved", "facebook_accounts", {"count": len(normalized)})
-    return {"success": True, "accounts": normalized}
+    return {"success": True, "accounts": [_public_facebook_profile(item) for item in normalized]}
 
 
 @router.post("/facebook/exchange-token", dependencies=[Depends(require_admin)])
