@@ -38,10 +38,10 @@ async def test_upload_public_facebook_url_and_cleanup(tmp_path, monkeypatch):
 
 
 def test_expired_uploads_are_removed(tmp_path):
-    settings = Settings(_env_file=None, temporary_upload_dir=tmp_path, temporary_upload_ttl_minutes=20)
+    settings = Settings(_env_file=None, temporary_upload_dir=tmp_path, temporary_upload_ttl_minutes=10)
     stored = store_temporary_image(settings, "aGVsbG8=", "photo.jpg", "image/jpeg")
     file_path = next((tmp_path / stored["file_id"]).iterdir())
-    old = (datetime.now(timezone.utc) - timedelta(minutes=21)).timestamp()
+    old = (datetime.now(timezone.utc) - timedelta(minutes=11)).timestamp()
     import os
 
     os.utime(file_path, (old, old))

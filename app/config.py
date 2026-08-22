@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     )
     max_request_size_mb: int = 30
     temporary_upload_dir: Path = Path("data/uploads/temp")
-    temporary_upload_ttl_minutes: int = 20
+    temporary_upload_ttl_minutes: int = 10
     max_raw_message_size_mb: int = 10
     read_only: bool = False
     allow_copy_in_read_only: bool = False
