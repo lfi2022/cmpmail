@@ -45,5 +45,6 @@ def test_expired_uploads_are_removed(tmp_path):
     import os
 
     os.utime(file_path, (old, old))
+    os.utime(tmp_path / stored["file_id"], (old, old))
     assert cleanup_expired_uploads(settings) == 1
     assert not (tmp_path / stored["file_id"]).exists()
