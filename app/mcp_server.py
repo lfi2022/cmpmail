@@ -202,6 +202,24 @@ async def execute(
     return output
 
 
+async def _resolve_facebook_user_token() -> str | None:
+    configured = (settings.facebook_user_access_token or "").strip()
+    if configured:
+        return configured
+
+    async with SessionLocal() as db:
+        stored = await db.get(SystemSetting, "facebook_accounts")
+        accounts: list[dict[str, Any]] = []
+        if stored and isinstance(stored.value, dict):
+            accounts = stored.value.get("accounts", []) or []
+
+    for profile in accounts:
+        token = str(profile.get("user_access_token") or "").strip()
+        if token:
+            return token
+    return None
+
+
 async def _resolve_facebook_token(
     *,
     page_id: str | None = None,
@@ -210,19 +228,7 @@ async def _resolve_facebook_token(
     if access_token:
         return access_token, page_id or settings.facebook_default_page_id
 
-    user_candidate = (settings.facebook_user_access_token or "").strip()
-    stored_profiles: list[dict[str, Any]] = []
-    async with SessionLocal() as db:
-        stored = await db.get(SystemSetting, "facebook_accounts")
-        if stored and isinstance(stored.value, dict):
-            stored_profiles = stored.value.get("accounts", []) or []
-
-    for profile in stored_profiles:
-        profile_user_token = str(profile.get("user_access_token") or "").strip()
-        if profile_user_token:
-            user_candidate = profile_user_token
-            break
-
+    user_candidate = await _resolve_facebook_user_token()
     if user_candidate:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(
@@ -263,39 +269,39 @@ async def _resolve_facebook_token(
         if stored and isinstance(stored.value, dict):
             accounts = stored.value.get("accounts", []) or []
 
-        if not accounts:
-            return settings.facebook_page_access_token, page_id or settings.facebook_default_page_id
+    if not accounts:
+        return settings.facebook_page_access_token, page_id or settings.facebook_default_page_id
 
-        if page_id:
-            for profile in accounts:
-                profile_pages = profile.get("pages") or []
-                for page in profile_pages:
-                    if str(page.get("id") or "") == str(page_id):
-                        token = page.get("access_token") or profile.get("page_access_token") or ""
-                        return str(token) if token else None, page_id
-
+    if page_id:
         for profile in accounts:
-            profile_default_page_id = str(profile.get("default_page_id") or "").strip()
-            if profile_default_page_id and (not page_id or profile_default_page_id == str(page_id)):
-                token = profile.get("page_access_token") or ""
-                return str(token) if token else None, profile_default_page_id
-
-            for page in profile.get("pages") or []:
-                if page.get("default"):
+            profile_pages = profile.get("pages") or []
+            for page in profile_pages:
+                if str(page.get("id") or "") == str(page_id):
                     token = page.get("access_token") or profile.get("page_access_token") or ""
-                    page_key = str(page.get("id") or "").strip()
-                    return (str(token) if token else None, page_key)
+                    return str(token) if token else None, page_id
 
-        first_profile = accounts[0]
-        first_token = first_profile.get("page_access_token") or ""
-        pages = first_profile.get("pages") or []
-        if pages:
-            first_page = pages[0]
-            return (
-                str(first_page.get("access_token") or first_token) if (first_page.get("access_token") or first_token) else None,
-                str(first_page.get("id") or "") if first_page.get("id") else None,
-            )
-        return (str(first_token) if first_token else None, first_profile.get("default_page_id"))
+    for profile in accounts:
+        profile_default_page_id = str(profile.get("default_page_id") or "").strip()
+        if profile_default_page_id and (not page_id or profile_default_page_id == str(page_id)):
+            token = profile.get("page_access_token") or ""
+            return str(token) if token else None, profile_default_page_id
+
+        for page in profile.get("pages") or []:
+            if page.get("default"):
+                token = page.get("access_token") or profile.get("page_access_token") or ""
+                page_key = str(page.get("id") or "").strip()
+                return (str(token) if token else None, page_key)
+
+    first_profile = accounts[0]
+    first_token = first_profile.get("page_access_token") or ""
+    pages = first_profile.get("pages") or []
+    if pages:
+        first_page = pages[0]
+        return (
+            str(first_page.get("access_token") or first_token) if (first_page.get("access_token") or first_token) else None,
+            str(first_page.get("id") or "") if first_page.get("id") else None,
+        )
+    return (str(first_token) if first_token else None, first_profile.get("default_page_id"))
 
 
 async def _facebook_action(
@@ -318,107 +324,13 @@ async def _facebook_action(
         return failure(str(getattr(exc, "detail", exc)))
 
 
-async def _resolve_facebook_token(
-    *,
-    page_id: str | None = None,
-    access_token: str | None = None,
-) -> tuple[str | None, str | None]:
-    if access_token:
-        return access_token, page_id or settings.facebook_default_page_id
-
-    user_candidate = (settings.facebook_user_access_token or "").strip()
-    async with SessionLocal() as db:
-        stored = await db.get(SystemSetting, "facebook_accounts")
-        accounts: list[dict[str, Any]] = []
-        if stored and isinstance(stored.value, dict):
-            accounts = stored.value.get("accounts", []) or []
-
-    if not user_candidate:
-        for profile in accounts:
-            user_candidate = str(profile.get("user_access_token") or "").strip()
-            if user_candidate:
-                break
-
-    if user_candidate:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                f"https://graph.facebook.com/{settings.facebook_graph_api_version}/me/accounts",
-                params={
-                    "access_token": user_candidate,
-                    "fields": "id,name,access_token",
-                },
-            )
-            if response.is_error:
-                return user_candidate, page_id or settings.facebook_default_page_id
-            payload = response.json()
-            pages = payload.get("data", []) if isinstance(payload, dict) else []
-            if isinstance(pages, list) and pages:
-                if page_id:
-                    for page in pages:
-                        if str(page.get("id") or "") == str(page_id):
-                            token = str(page.get("access_token") or "").strip()
-                            if token:
-                                return token, page_id
-                default_page_id = str(settings.facebook_default_page_id or "").strip()
-                if default_page_id:
-                    for page in pages:
-                        if str(page.get("id") or "") == default_page_id:
-                            token = str(page.get("access_token") or "").strip()
-                            if token:
-                                return token, default_page_id
-                first_page = pages[0]
-                token = str(first_page.get("access_token") or "").strip()
-                page_key = str(first_page.get("id") or "").strip()
-                if token:
-                    return token, page_key or page_id or settings.facebook_default_page_id
-        return user_candidate, page_id or settings.facebook_default_page_id
-
-    async with SessionLocal() as db:
-        stored = await db.get(SystemSetting, "facebook_accounts")
-        accounts = []
-        if stored and isinstance(stored.value, dict):
-            accounts = stored.value.get("accounts", []) or []
-
-        if not accounts:
-            return settings.facebook_page_access_token, page_id or settings.facebook_default_page_id
-
-        if page_id:
-            for profile in accounts:
-                profile_pages = profile.get("pages") or []
-                for page in profile_pages:
-                    if str(page.get("id") or "") == str(page_id):
-                        token = page.get("access_token") or profile.get("page_access_token") or ""
-                        return str(token) if token else None, page_id
-
-        for profile in accounts:
-            profile_default_page_id = str(profile.get("default_page_id") or "").strip()
-            if profile_default_page_id and (not page_id or profile_default_page_id == str(page_id)):
-                token = profile.get("page_access_token") or ""
-                return str(token) if token else None, profile_default_page_id
-
-            for page in profile.get("pages") or []:
-                if page.get("default"):
-                    token = page.get("access_token") or profile.get("page_access_token") or ""
-                    return (str(token) if token else None, str(page.get("id") or ""))
-
-        first_profile = accounts[0]
-        first_token = first_profile.get("page_access_token") or ""
-        pages = first_profile.get("pages") or []
-        if pages:
-            first_page = pages[0]
-            return (
-                str(first_page.get("access_token") or first_token) if (first_page.get("access_token") or first_token) else None,
-                str(first_page.get("id") or "") if first_page.get("id") else None,
-            )
-        return (str(first_token) if first_token else None, first_profile.get("default_page_id"))
-
-
 @mcp.tool()
 async def facebook_list_pages(access_token: str | None = None) -> dict[str, Any]:
-    """List the Facebook Pages available to the configured access token. Permission: facebook.read."""
+    """List the Facebook Pages available to the configured user token. Permission: facebook.read."""
 
     async def action(service: FacebookService, page_id: str | None):
-        return await service.list_pages(access_token=access_token)
+        user_token = access_token or await _resolve_facebook_user_token() or service.access_token
+        return await service.list_pages(access_token=user_token)
 
     return await _facebook_action("facebook_list_pages", access_token=access_token, callback=action)
 
