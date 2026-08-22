@@ -454,19 +454,20 @@ async def facebook_create_photo_post(
         target = page_id or resolved_page_id
         if not target:
             raise ValueError("A Facebook page_id is required or set FACEBOOK_DEFAULT_PAGE_ID")
+        photo_url = image_url
         temporary_id = temporary_file_id
         if image_base64:
             stored = store_temporary_image(settings, image_base64, image_filename, image_mime_type)
             temporary_id = stored["file_id"]
-            image_url = stored["url"]
+            photo_url = stored["url"]
         elif temporary_id:
             path, _ = resolve_temporary_image(settings, temporary_id)
-            image_url = f"{settings.public_url.rstrip('/')}/temp-media/{temporary_id}/{path.name}"
+            photo_url = f"{settings.public_url.rstrip('/')}/temp-media/{temporary_id}/{path.name}"
         try:
             return await service.create_photo_post(
                 target,
                 message=message,
-                image_url=image_url,
+                image_url=photo_url,
                 image_base64=None,
                 image_filename=image_filename,
                 image_mime_type=image_mime_type,

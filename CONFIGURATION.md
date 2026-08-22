@@ -21,6 +21,7 @@ Variables essentielles :
 | `ALLOW_COPY_IN_READ_ONLY` | seule exception possible au mode lecture seule |
 | `DESTRUCTIVE_OPERATIONS_ENABLED` | coupe les EXPUNGE permanents |
 | `MAX_REQUEST_SIZE_MB`, `MAX_ATTACHMENT_SIZE_MB`, `MAX_RAW_MESSAGE_SIZE_MB` | limites mémoire et données |
+| `TEMPORARY_UPLOAD_DIR`, `TEMPORARY_UPLOAD_TTL_MINUTES` | stockage local et durée de vie des images temporaires |
 | `ATTACHMENT_SAVE_DIR`, `BLOCKED_ATTACHMENT_TYPES` | racine contrôlée et types MIME interdits |
 
 Après toute modification : `pm2 restart lfinfo-mail-mcp --update-env`.
@@ -40,3 +41,5 @@ Les réglages réseau/de sécurité sont lus au démarrage : leur modification d
 L'interface admin reçoit un User Access Token courte durée, l'échange côté serveur contre un token longue durée via `fb_exchange_token`, puis stocke seulement sa version chiffrée avec `ENCRYPTION_KEY` et sa date d'expiration. Les Page Access Tokens sont récupérés dynamiquement via `/me/accounts` et ne sont jamais renvoyés par les APIs d'administration ou les tools MCP.
 
 Les scopes MCP requis sont `facebook.read`, `facebook.write` et `facebook.moderate`. Les permissions Meta correspondantes doivent être accordées à l'application et au compte administrateur de la Page. Certaines fonctionnalités, en particulier les notifications et les métriques Insights, dépendent de permissions et de métriques toujours disponibles dans la version Graph API configurée ; les erreurs Meta sont renvoyées explicitement sans faux succès.
+
+L'outil `upload_temporary_image` accepte les images JPEG, PNG et WEBP jusqu'à 10 MiB et renvoie une URL publique temporaire basée sur `PUBLIC_URL`. Cette URL est volontairement accessible sans authentification pour permettre son téléchargement par Meta. Configurez `PUBLIC_URL` avec l'URL HTTPS publique du serveur; les fichiers sont purgés après 20 minutes par défaut. `facebook_create_photo_post` accepte aussi `temporary_file_id` et supprime le fichier après l'appel Facebook.

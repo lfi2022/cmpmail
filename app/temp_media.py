@@ -33,7 +33,7 @@ def _safe_filename(filename: str | None, mime_type: str) -> str:
 
 
 def _decode_image(image_base64: str, mime_type: str, filename: str | None) -> tuple[bytes, str]:
-    mime = str(mime_type or mimetypes.guess_type(str(filename or ""))[0] or "").lower()
+    mime = str(mime_type or mimetypes.guess_type(str(filename or ""))[0] or "image/jpeg").lower()
     if mime not in SUPPORTED_IMAGE_MIME_TYPES:
         raise ValueError("Supported image MIME types are JPEG, PNG, and WEBP")
     encoded = image_base64
@@ -81,7 +81,7 @@ def store_temporary_image(
     filename: str | None = None,
     mime_type: str | None = None,
 ) -> dict[str, str]:
-    mime = str(mime_type or mimetypes.guess_type(str(filename or ""))[0] or "").lower()
+    mime = str(mime_type or mimetypes.guess_type(str(filename or ""))[0] or "image/jpeg").lower()
     binary, safe_name = _decode_image(image_base64, mime, filename)
     token = secrets.token_urlsafe(32)
     directory = settings.temporary_upload_dir / token
