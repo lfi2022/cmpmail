@@ -30,8 +30,20 @@ PERMISSIONS = {
     "mail.delete",
     "mail.folders",
     "mail.attachments",
+    "facebook.read",
+    "facebook.write",
+    "facebook.moderate",
 }
-MUTATING_PERMISSIONS = {"send", "move", "copy", "flags", "delete", "folders"}
+MUTATING_PERMISSIONS = {
+    "send",
+    "move",
+    "copy",
+    "flags",
+    "delete",
+    "folders",
+    "facebook.write",
+    "facebook.moderate",
+}
 _hasher = PasswordHasher()
 
 

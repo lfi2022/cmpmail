@@ -7,6 +7,7 @@ from app.config import Settings
 from app.middleware import content_security_policy, normalize_mcp_path
 from app.schemas import normalize_account_name
 from app.security import (
+    PERMISSIONS,
     CredentialCipher,
     create_api_key,
     require_permission,
@@ -45,6 +46,24 @@ def test_filename_sanitation(value, expected):
 def test_safe_destination_cannot_escape(tmp_path: Path):
     target = safe_destination(tmp_path, "../../secret.txt")
     assert target.parent == tmp_path.resolve()
+
+
+def test_facebook_permissions_are_registered():
+    assert "facebook.read" in PERMISSIONS
+    assert "facebook.write" in PERMISSIONS
+    assert "facebook.moderate" in PERMISSIONS
+
+    settings = Settings(
+        secret_key="x",
+        encryption_key="x",
+        admin_password_hash="x",
+        facebook_page_access_token="page-token",
+        facebook_app_id="app-id",
+        facebook_app_secret="app-secret",
+        facebook_default_page_id="123456",
+    )
+    assert settings.facebook_page_access_token == "page-token"
+    assert settings.facebook_default_page_id == "123456"
 
 
 def test_read_only_blocks_mutation():

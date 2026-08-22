@@ -50,8 +50,18 @@ SCOPES = {
     "mail.delete": "Permanently delete messages and drafts",
     "mail.folders": "Create, rename, subscribe and delete folders",
     "mail.attachments": "List and download attachments",
+    "facebook.read": "Read Facebook Page data, posts, comments, notifications and insights",
+    "facebook.write": "Create or delete Facebook posts and replies",
+    "facebook.moderate": "Hide or moderate Facebook comments and content",
 }
-DEFAULT_SCOPES = ["openid", "profile", "email", "accounts.read", "mail.read"]
+DEFAULT_SCOPES = [
+    "openid",
+    "profile",
+    "email",
+    "accounts.read",
+    "mail.read",
+    "facebook.read",
+]
 
 
 def now() -> datetime:

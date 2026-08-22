@@ -92,7 +92,7 @@ class AuditLog(Base):
 class SystemSetting(Base):
     __tablename__ = "system_settings"
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
-    value: Mapped[Any] = mapped_column(JSON)
+    value: Mapped[Any] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

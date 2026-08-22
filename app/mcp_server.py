@@ -12,9 +12,10 @@ from app.audit import audit_event
 from app.auth import current_actor, current_permissions, current_request_meta
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import AuditLog, OperationLog
+from app.models import AuditLog, OperationLog, SystemSetting
 from app.security import CredentialCipher, require_permission
 from app.services.accounts import AccountRepository, public_account
+from app.services.facebook import FacebookAPIError, FacebookService
 from app.services.mail import MailService, failure, partial, plain_forward, result
 
 settings = get_settings()
@@ -75,6 +76,18 @@ TOOL_PERMISSIONS = {
     "list_attachments": "attachments",
     "download_attachment": "attachments",
     "save_attachment": "attachments",
+    "facebook_list_pages": "facebook.read",
+    "facebook_get_page": "facebook.read",
+    "facebook_list_posts": "facebook.read",
+    "facebook_get_post": "facebook.read",
+    "facebook_create_post": "facebook.write",
+    "facebook_create_photo_post": "facebook.write",
+    "facebook_delete_post": "facebook.write",
+    "facebook_get_comments": "facebook.read",
+    "facebook_reply_comment": "facebook.write",
+    "facebook_hide_comment": "facebook.moderate",
+    "facebook_get_insights": "facebook.read",
+    "facebook_get_notifications": "facebook.read",
 }
 
 # Convert the legacy capability names into explicit OAuth scopes. Keeping the
@@ -186,6 +199,273 @@ async def execute(
     except Exception:
         pass
     return output
+
+
+async def _resolve_facebook_token(
+    *,
+    page_id: str | None = None,
+    access_token: str | None = None,
+) -> tuple[str | None, str | None]:
+    if access_token:
+        return access_token, page_id or settings.facebook_default_page_id
+
+    async with SessionLocal() as db:
+        stored = await db.get(SystemSetting, "facebook_accounts")
+        accounts: list[dict[str, Any]] = []
+        if stored and isinstance(stored.value, dict):
+            accounts = stored.value.get("accounts", []) or []
+
+        if not accounts:
+            return settings.facebook_page_access_token, page_id or settings.facebook_default_page_id
+
+        if page_id:
+            for profile in accounts:
+                profile_pages = profile.get("pages") or []
+                for page in profile_pages:
+                    if str(page.get("id") or "") == str(page_id):
+                        token = page.get("access_token") or profile.get("page_access_token") or ""
+                        return str(token) if token else None, page_id
+
+        for profile in accounts:
+            profile_default_page_id = str(profile.get("default_page_id") or "").strip()
+            if profile_default_page_id and (not page_id or profile_default_page_id == str(page_id)):
+                token = profile.get("page_access_token") or ""
+                return str(token) if token else None, profile_default_page_id
+
+            for page in profile.get("pages") or []:
+                if page.get("default"):
+                    token = page.get("access_token") or profile.get("page_access_token") or ""
+                    page_key = str(page.get("id") or "").strip()
+                    return (str(token) if token else None, page_key)
+
+        first_profile = accounts[0]
+        first_token = first_profile.get("page_access_token") or ""
+        pages = first_profile.get("pages") or []
+        if pages:
+            first_page = pages[0]
+            return (
+                str(first_page.get("access_token") or first_token) if (first_page.get("access_token") or first_token) else None,
+                str(first_page.get("id") or "") if first_page.get("id") else None,
+            )
+        return (str(first_token) if first_token else None, first_profile.get("default_page_id"))
+
+
+async def _facebook_action(
+    tool: str,
+    *,
+    access_token: str | None = None,
+    page_id: str | None = None,
+    callback: Callable[[FacebookService], Awaitable[Any]],
+) -> dict[str, Any]:
+    try:
+        require_permission(TOOL_PERMISSIONS[tool], current_permissions.get(), settings)
+        resolved_access_token, resolved_page_id = await _resolve_facebook_token(
+            page_id=page_id,
+            access_token=access_token,
+        )
+        service = FacebookService(settings, resolved_access_token)
+        output = await callback(service, resolved_page_id)
+        return result(output)
+    except Exception as exc:
+        return failure(str(getattr(exc, "detail", exc)))
+
+
+@mcp.tool()
+async def facebook_list_pages(access_token: str | None = None) -> dict[str, Any]:
+    """List the Facebook Pages available to the configured access token. Permission: facebook.read."""
+
+    async def action(service: FacebookService, page_id: str | None):
+        return await service.list_pages(access_token=access_token)
+
+    return await _facebook_action("facebook_list_pages", access_token=access_token, callback=action)
+
+
+@mcp.tool()
+async def facebook_get_page(page_id: str | None = None, access_token: str | None = None) -> dict[str, Any]:
+    """Get a single Facebook Page by ID or the configured default page. Permission: facebook.read."""
+
+    async def action(service: FacebookService, resolved_page_id: str | None):
+        target = page_id or resolved_page_id
+        if not target:
+            raise ValueError("A Facebook page_id is required or set FACEBOOK_DEFAULT_PAGE_ID")
+        return await service.get_page(target, access_token=access_token)
+
+    return await _facebook_action("facebook_get_page", access_token=access_token, page_id=page_id, callback=action)
+
+
+@mcp.tool()
+async def facebook_list_posts(
+    page_id: str | None = None,
+    limit: int = 25,
+    since: str | None = None,
+    until: str | None = None,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    """List recent posts for a Facebook Page. Permission: facebook.read."""
+
+    async def action(service: FacebookService, resolved_page_id: str | None):
+        target = page_id or resolved_page_id
+        if not target:
+            raise ValueError("A Facebook page_id is required or set FACEBOOK_DEFAULT_PAGE_ID")
+        return await service.list_posts(target, limit=limit, since=since, until=until, access_token=access_token)
+
+    return await _facebook_action("facebook_list_posts", access_token=access_token, page_id=page_id, callback=action)
+
+
+@mcp.tool()
+async def facebook_get_post(post_id: str, access_token: str | None = None) -> dict[str, Any]:
+    """Get one Facebook Page post including metadata and comments summary. Permission: facebook.read."""
+
+    async def action(service: FacebookService, page_id: str | None):
+        return await service.get_post(post_id, access_token=access_token)
+
+    return await _facebook_action("facebook_get_post", access_token=access_token, callback=action)
+
+
+@mcp.tool()
+async def facebook_create_post(
+    page_id: str | None = None,
+    message: str | None = None,
+    link: str | None = None,
+    published: bool = True,
+    scheduled_publish_time: str | None = None,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    """Create a text or link post on a Facebook Page. Permission: facebook.write."""
+
+    async def action(service: FacebookService, resolved_page_id: str | None):
+        target = page_id or resolved_page_id
+        if not target:
+            raise ValueError("A Facebook page_id is required or set FACEBOOK_DEFAULT_PAGE_ID")
+        return await service.create_post(
+            target,
+            message=message,
+            link=link,
+            published=published,
+            scheduled_publish_time=scheduled_publish_time,
+            access_token=access_token,
+        )
+
+    return await _facebook_action("facebook_create_post", access_token=access_token, page_id=page_id, callback=action)
+
+
+@mcp.tool()
+async def facebook_create_photo_post(
+    page_id: str | None = None,
+    message: str | None = None,
+    image_url: str | None = None,
+    image_base64: str | None = None,
+    image_filename: str = "facebook-post.jpg",
+    image_mime_type: str | None = None,
+    published: bool = True,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    """Create a photo post on a Facebook Page. Permission: facebook.write."""
+
+    async def action(service: FacebookService, resolved_page_id: str | None):
+        target = page_id or resolved_page_id
+        if not target:
+            raise ValueError("A Facebook page_id is required or set FACEBOOK_DEFAULT_PAGE_ID")
+        return await service.create_photo_post(
+            target,
+            message=message,
+            image_url=image_url,
+            image_base64=image_base64,
+            image_filename=image_filename,
+            image_mime_type=image_mime_type,
+            published=published,
+            access_token=access_token,
+        )
+
+    return await _facebook_action("facebook_create_photo_post", access_token=access_token, page_id=page_id, callback=action)
+
+
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True, idempotentHint=True))
+async def facebook_delete_post(post_id: str, access_token: str | None = None) -> dict[str, Any]:
+    """Delete a Facebook Page post. Permission: facebook.write."""
+
+    async def action(service: FacebookService, page_id: str | None):
+        return await service.delete_post(post_id, access_token=access_token)
+
+    return await _facebook_action("facebook_delete_post", access_token=access_token, callback=action)
+
+
+@mcp.tool()
+async def facebook_get_comments(
+    object_id: str,
+    limit: int = 25,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    """List comments for a Facebook post or comment thread. Permission: facebook.read."""
+
+    async def action(service: FacebookService, page_id: str | None):
+        return await service.get_comments(object_id, limit=limit, access_token=access_token)
+
+    return await _facebook_action("facebook_get_comments", access_token=access_token, callback=action)
+
+
+@mcp.tool()
+async def facebook_reply_comment(
+    comment_id: str,
+    message: str,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    """Reply to a Facebook comment. Permission: facebook.write."""
+
+    async def action(service: FacebookService, page_id: str | None):
+        return await service.reply_comment(comment_id, message=message, access_token=access_token)
+
+    return await _facebook_action("facebook_reply_comment", access_token=access_token, callback=action)
+
+
+@mcp.tool()
+async def facebook_hide_comment(
+    comment_id: str,
+    hidden: bool = True,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    """Hide or unhide a Facebook comment. Permission: facebook.moderate."""
+
+    async def action(service: FacebookService, page_id: str | None):
+        return await service.hide_comment(comment_id, hidden=hidden, access_token=access_token)
+
+    return await _facebook_action("facebook_hide_comment", access_token=access_token, callback=action)
+
+
+@mcp.tool()
+async def facebook_get_insights(
+    page_id: str | None = None,
+    metric: str | list[str] | None = None,
+    period: str = "day",
+    since: str | None = None,
+    until: str | None = None,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    """Fetch Facebook Page insights for the configured or provided page. Permission: facebook.read."""
+
+    async def action(service: FacebookService, resolved_page_id: str | None):
+        target = page_id or resolved_page_id
+        if not target:
+            raise ValueError("A Facebook page_id is required or set FACEBOOK_DEFAULT_PAGE_ID")
+        return await service.get_insights(target, metric=metric, period=period, since=since, until=until, access_token=access_token)
+
+    return await _facebook_action("facebook_get_insights", access_token=access_token, page_id=page_id, callback=action)
+
+
+@mcp.tool()
+async def facebook_get_notifications(
+    page_id: str | None = None,
+    unread_only: bool = False,
+    limit: int = 25,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    """List Facebook notifications. Permission: facebook.read."""
+
+    async def action(service: FacebookService, resolved_page_id: str | None):
+        target = page_id or resolved_page_id
+        return await service.get_notifications(page_id=target, unread_only=unread_only, limit=limit, access_token=access_token)
+
+    return await _facebook_action("facebook_get_notifications", access_token=access_token, page_id=page_id, callback=action)
 
 
 @mcp.tool()

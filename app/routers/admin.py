@@ -22,6 +22,7 @@ from app.models import (
     OAuthRefreshToken,
     OAuthSession,
     OAuthUser,
+    SystemSetting,
 )
 from app.schemas import AccountCreate, AccountUpdate, ApiKeyCreate, LoginRequest
 from app.security import (
@@ -438,7 +439,14 @@ async def diagnostics(
 
 
 @router.get("/configuration", dependencies=[Depends(require_admin)])
-async def configuration(settings: Settings = Depends(get_settings)):
+async def configuration(
+    settings: Settings = Depends(get_settings),
+    db: AsyncSession = Depends(get_db),
+):
+    stored = await db.get(SystemSetting, "facebook_accounts")
+    accounts = []
+    if stored and isinstance(stored.value, dict):
+        accounts = stored.value.get("accounts", [])
     return {
         "public_url": settings.public_url,
         "mcp_path": settings.mcp_path,
@@ -453,6 +461,11 @@ async def configuration(settings: Settings = Depends(get_settings)):
         "blocked_attachment_types": settings.blocked_attachment_types,
         "max_request_size_mb": settings.max_request_size_mb,
         "destructive_operations_enabled": settings.destructive_operations_enabled,
+        "facebook": {
+            "graph_api_version": settings.facebook_graph_api_version,
+            "credentials_managed_in_frontend": True,
+            "profiles": accounts,
+        },
         "oauth": {
             "enabled": settings.oauth_enabled,
             "issuer": settings.issuer,
@@ -472,6 +485,58 @@ async def configuration(settings: Settings = Depends(get_settings)):
             else "missing",
         },
     }
+
+
+@router.get("/facebook/config", dependencies=[Depends(require_admin)])
+async def facebook_config(db: AsyncSession = Depends(get_db)):
+    stored = await db.get(SystemSetting, "facebook_accounts")
+    accounts = []
+    if stored and isinstance(stored.value, dict):
+        accounts = stored.value.get("accounts", [])
+    return {"accounts": accounts}
+
+
+@router.post("/facebook/config", dependencies=[Depends(require_admin)])
+async def save_facebook_config(
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    accounts = payload.get("accounts") or []
+    if not isinstance(accounts, list):
+        raise HTTPException(422, "accounts must be a list")
+    normalized = []
+    for item in accounts:
+        if not isinstance(item, dict):
+            raise HTTPException(422, "Each account must be an object")
+        normalized.append(
+            {
+                "id": str(item.get("id") or item.get("label") or f"facebook-{len(normalized)}"),
+                "label": str(item.get("label") or "Facebook"),
+                "app_id": str(item.get("app_id") or ""),
+                "app_secret": str(item.get("app_secret") or ""),
+                "page_access_token": str(item.get("page_access_token") or ""),
+                "default_page_id": str(item.get("default_page_id") or ""),
+                "pages": [
+                    {
+                        "id": str(page.get("id") or ""),
+                        "name": str(page.get("name") or ""),
+                        "access_token": str(page.get("access_token") or ""),
+                        "default": bool(page.get("default")),
+                    }
+                    for page in (item.get("pages") or [])
+                    if isinstance(page, dict)
+                ],
+            }
+        )
+    setting = await db.get(SystemSetting, "facebook_accounts")
+    if setting is None:
+        setting = SystemSetting(key="facebook_accounts", value={"accounts": normalized})
+    else:
+        setting.value = {"accounts": normalized}
+    db.add(setting)
+    await db.commit()
+    await record_admin_audit(db, "facebook.config.saved", "facebook_accounts", {"count": len(normalized)})
+    return {"success": True, "accounts": normalized}
 
 
 @router.get("/oauth/clients", dependencies=[Depends(require_admin)])

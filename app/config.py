@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     read_only: bool = False
     allow_copy_in_read_only: bool = False
     destructive_operations_enabled: bool = True
+    facebook_graph_api_version: str = "v19.0"
+    facebook_app_id: str = ""
+    facebook_app_secret: str = ""
+    facebook_page_access_token: str = ""
+    facebook_default_page_id: str | None = None
     rate_limit_per_minute: int = 120
     mail_timeout_seconds: int = 30
     log_level: str = "INFO"
