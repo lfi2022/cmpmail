@@ -425,7 +425,7 @@ async def upload_temporary_image(
     filename: str | None = None,
     mime_type: str | None = None,
 ) -> dict[str, Any]:
-    """Store a short-lived JPEG, PNG, or WEBP for Facebook to download. Permission: facebook.write."""
+    """Upload a ChatGPT image for Facebook. Call this first, then pass data.file_id as temporary_file_id to facebook_create_photo_post. Permission: facebook.write."""
     try:
         require_permission(TOOL_PERMISSIONS["upload_temporary_image"], current_permissions.get(), settings)
         return result(store_temporary_image(settings, image_base64, filename, mime_type))
@@ -445,7 +445,7 @@ async def facebook_create_photo_post(
     published: bool = True,
     access_token: str | None = None,
 ) -> dict[str, Any]:
-    """Create a photo post on a Facebook Page. Permission: facebook.write."""
+    """Create a Facebook photo post. Use temporary_file_id from upload_temporary_image, or pass image_base64 directly for automatic temporary upload. Permission: facebook.write."""
     provided_images = sum(bool(value) for value in (image_url, image_base64, temporary_file_id))
     if provided_images != 1:
         return failure("Provide exactly one of image_url, image_base64, or temporary_file_id")

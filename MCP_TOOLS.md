@@ -20,6 +20,7 @@ Tous les outils acceptent `account_name` lorsque pertinent; sans valeur, le comp
 | Brouillons | `delete_draft` | delete | destructif |
 | SMTP | `send_email`, `reply_email`, `reply_all`, `forward_email` | send | oui, auditée |
 | Pièces jointes | `list_attachments`, `download_attachment`, `save_attachment` | attachments | non |
+| Facebook images | `upload_temporary_image` | facebook.write | oui, temporaire |
 
 ## Paramètres et comportements
 
@@ -30,6 +31,7 @@ Tous les outils acceptent `account_name` lorsque pertinent; sans valeur, le comp
 - MOVE/COPY : `target_mailbox`; la réponse fournit `old_uid`, `old_mailbox`, `new_uid`, `new_mailbox`, `message_id`. N'utilisez plus l'ancien UID après MOVE.
 - SMTP : `to`, `subject`, `text`, `html`, `cc`, `bcc`, `reply_to`, `attachments`, `headers`. Une PJ vaut `{filename,content_type,content_base64}`.
 - Reply/forward : `mailbox`, `uid`, contenu et destinataires; le forward accepte `include_attachments=false`. Les réponses utilisent `In-Reply-To` et `References`; jamais le sujet seul.
+- Images Facebook : pour une image jointe dans ChatGPT, appeler `upload_temporary_image` avec `image_base64`, `filename` et `mime_type`. Réutiliser ensuite la valeur `file_id` retournée comme `temporary_file_id` dans `facebook_create_photo_post`. Le serveur fournit l'URL HTTPS publique à Meta et supprime le fichier après l'appel Facebook; l'URL expire aussi après 10 minutes. Pour un appel unique, `facebook_create_photo_post` accepte directement `image_base64` et effectue automatiquement ce même transfert temporaire.
 - Flags autorisés : `\\Seen`, `\\Answered`, `\\Flagged`, `\\Deleted`, `\\Draft`.
 
 Exemple d'appel :
