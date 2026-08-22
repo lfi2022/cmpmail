@@ -13,6 +13,7 @@ from app.audit import audit_event
 from app.auth import create_admin_session, require_admin
 from app.config import Settings, get_settings
 from app.database import check_database, get_db
+from app.services.facebook_token_manager import FacebookTokenManager
 from app.models import (
     ApiKey,
     AuditLog,
@@ -538,6 +539,60 @@ async def save_facebook_config(
     await db.commit()
     await record_admin_audit(db, "facebook.config.saved", "facebook_accounts", {"count": len(normalized)})
     return {"success": True, "accounts": normalized}
+
+
+@router.post("/facebook/exchange-token", dependencies=[Depends(require_admin)])
+async def facebook_exchange_token(payload: dict):
+    """
+    Exchange a short-lived Facebook user access token for a long-lived one.
+    
+    Body: {"short_lived_token": "..."}
+    Response: {"success": true/false, "status": {...}, "error": "..." if failed}
+    
+    Note: The actual token is never returned to the frontend.
+    """
+    short_token = payload.get("short_lived_token", "").strip()
+    if not short_token:
+        raise HTTPException(422, "short_lived_token is required")
+    
+    token_mgr = FacebookTokenManager()
+    try:
+        long_token, expiry = await token_mgr.exchange_short_lived_token(short_token)
+        # Don't return the token itself, just status
+        status = await token_mgr.get_token_status()
+        return {"success": True, "status": status}
+    except Exception as e:
+        error_msg = str(e)
+        raise HTTPException(400, error_msg)
+
+
+@router.get("/facebook/token-status", dependencies=[Depends(require_admin)])
+async def facebook_token_status():
+    """
+    Get the status of the long-lived Facebook user access token.
+    
+    Response: {"has_token": bool, "status": "no_token|expired|expiring_soon|expiring_week|valid", "expiry": "ISO string", "days_remaining": float}
+    
+    Note: The token itself is never exposed.
+    """
+    token_mgr = FacebookTokenManager()
+    status = await token_mgr.get_token_status()
+    return status
+
+
+@router.post("/facebook/clear-token", dependencies=[Depends(require_admin)])
+async def facebook_clear_token(db: AsyncSession = Depends(get_db)):
+    """
+    Clear the stored long-lived Facebook user access token.
+    
+    Response: {"success": true, "message": "Token cleared"}
+    """
+    token_mgr = FacebookTokenManager()
+    await token_mgr.clear_token()
+    
+    await record_admin_audit(db, "facebook.token.cleared", "facebook_token", {})
+    
+    return {"success": True, "message": "Token cleared"}
 
 
 @router.get("/oauth/clients", dependencies=[Depends(require_admin)])

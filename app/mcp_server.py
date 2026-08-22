@@ -17,6 +17,7 @@ from app.models import AuditLog, OperationLog, SystemSetting
 from app.security import CredentialCipher, require_permission
 from app.services.accounts import AccountRepository, public_account
 from app.services.facebook import FacebookAPIError, FacebookService
+from app.services.facebook_token_manager import FacebookTokenManager
 from app.services.mail import MailService, failure, partial, plain_forward, result
 
 settings = get_settings()
@@ -203,11 +204,19 @@ async def execute(
 
 
 async def _resolve_facebook_user_token() -> str | None:
-    """Resolve a Facebook user token from configuration or DB."""
+    """Resolve a Facebook user token (prefer long-lived from DB)."""
+    # Priority 1: Long-lived token from token manager
+    token_mgr = FacebookTokenManager()
+    long_lived_token, expiry = await token_mgr.get_long_lived_token()
+    if long_lived_token and expiry:
+        return long_lived_token
+
+    # Priority 2: Short-lived token from config (legacy/fallback)
     configured = (settings.facebook_user_access_token or "").strip()
     if configured:
         return configured
 
+    # Priority 3: Tokens from DB (legacy profile storage)
     async with SessionLocal() as db:
         stored = await db.get(SystemSetting, "facebook_accounts")
         accounts: list[dict[str, Any]] = []
