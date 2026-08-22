@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-import base64
 import asyncio
+import base64
+import binascii
+import logging
 import mimetypes
 import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
 from app.config import Settings
-
 
 PAGE_FIELDS = (
     "id",
@@ -85,6 +87,7 @@ _PAGE_ID_PATTERN = re.compile(r"^\d+$")
 _OBJECT_ID_PATTERN = re.compile(r"^\d+(?:_\d+)?$")
 _SUPPORTED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 _MAX_PHOTO_BYTES = 10 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 def redact_facebook_data(value: Any) -> Any:
@@ -128,7 +131,9 @@ def validate_image_url(value: str) -> str:
 
 
 class FacebookAPIError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, metadata: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.metadata = metadata or {}
 
 
 class FacebookService:
@@ -175,6 +180,7 @@ class FacebookService:
         
         url = f"{self.api_base}/{path.lstrip('/')}"
         endpoint_log = debug_endpoint or path or "unknown"
+        upload_method = "source" if files else "url" if data and "url" in data else None
         
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -191,8 +197,10 @@ class FacebookService:
                         break
                     await asyncio.sleep(0.25)
         except httpx.RequestError as exc:
+            logger.warning("Facebook network error endpoint=%s upload_method=%s error=%s", endpoint_log, upload_method, exc.__class__.__name__)
             raise FacebookAPIError(
-                f"Facebook API request failed on {endpoint_log}: {exc.__class__.__name__}"
+                f"Facebook API request failed on {endpoint_log}: {exc.__class__.__name__}",
+                metadata={"upload_method": upload_method} if upload_method else None,
             ) from exc
         try:
             payload = response.json()
@@ -212,6 +220,24 @@ class FacebookService:
                 }
             else:
                 message = str(payload)
+            metadata = {
+                "facebook_error": {
+                    "message": message,
+                    "type": error_detail.get("type"),
+                    "code": error_detail.get("code"),
+                    "error_subcode": error_detail.get("subcode"),
+                    "fbtrace_id": error_detail.get("trace_id"),
+                },
+                "upload_method": upload_method,
+            }
+            logger.warning(
+                "Facebook API error endpoint=%s upload_method=%s http_status=%s graph_code=%s fbtrace_id=%s",
+                endpoint_log,
+                upload_method,
+                response.status_code,
+                error_detail.get("code"),
+                error_detail.get("trace_id"),
+            )
             error_msg = f"Facebook API error on {endpoint_log}: {message}"
             if error_detail.get("code"):
                 error_msg += f" (code: {error_detail['code']}"
@@ -220,7 +246,7 @@ class FacebookService:
                 if error_detail.get("trace_id"):
                     error_msg += f", trace_id: {error_detail['trace_id']}"
                 error_msg += ")"
-            raise FacebookAPIError(error_msg)
+            raise FacebookAPIError(error_msg, metadata=metadata)
         if not isinstance(payload, dict):
             return {"value": redact_facebook_data(payload)}
         return redact_facebook_data(payload)
@@ -319,28 +345,44 @@ class FacebookService:
         message: str | None = None,
         image_url: str | None = None,
         image_base64: str | None = None,
+        image_file_path: Path | None = None,
         image_filename: str = "facebook-post.jpg",
         image_mime_type: str | None = None,
         published: bool = True,
         access_token: str | None = None,
     ) -> dict[str, Any]:
-        if bool(image_url) == bool(image_base64):
-            raise ValueError("Provide exactly one of image_url or image_base64")
+        if sum(bool(value) for value in (image_url, image_base64, image_file_path)) != 1:
+            raise ValueError("Provide exactly one of image_url, image_base64, or image_file_path")
         target = validate_facebook_id(page_id, page=True)
-        if not image_url and not image_base64:
-            raise ValueError("Either image_url or image_base64 must be provided")
-        
-        if image_base64:
-            try:
-                binary = base64.b64decode(image_base64, validate=True)
-            except ValueError as exc:
-                raise ValueError("image_base64 is not valid base64") from exc
+        if image_base64 or image_file_path:
+            filename = image_filename
+            if image_base64:
+                encoded = image_base64
+                if encoded.startswith("data:"):
+                    header, separator, encoded = encoded.partition(",")
+                    if not separator or ";base64" not in header.lower():
+                        raise ValueError("image_base64 data URI is invalid")
+                    declared_mime = header[5:].split(";", 1)[0].lower()
+                    if image_mime_type and image_mime_type.lower() != declared_mime:
+                        raise ValueError("image MIME type does not match the data URI")
+                    image_mime_type = declared_mime
+                try:
+                    binary = base64.b64decode(encoded, validate=True)
+                except (ValueError, binascii.Error) as exc:
+                    raise ValueError("image_base64 is not valid base64") from exc
+            else:
+                if not image_file_path.is_file():
+                    raise ValueError("temporary image file was not found")
+                binary = image_file_path.read_bytes()
+                filename = image_file_path.name
+            if not binary:
+                raise ValueError("image file is empty")
             if len(binary) > _MAX_PHOTO_BYTES:
-                raise ValueError("image_base64 exceeds the 10 MiB upload limit")
-            mime = image_mime_type or mimetypes.guess_type(image_filename)[0] or "image/jpeg"
+                raise ValueError("image exceeds the 10 MiB upload limit")
+            mime = image_mime_type or mimetypes.guess_type(filename)[0] or "image/jpeg"
             if mime not in _SUPPORTED_IMAGE_MIME_TYPES:
                 raise ValueError("Supported image MIME types are JPEG, PNG, and WEBP")
-            files = {"source": (image_filename, binary, mime)}
+            files = {"source": (filename, binary, mime)}
             form_data: dict[str, Any] = {}
             if message:
                 form_data["message"] = message
@@ -351,10 +393,11 @@ class FacebookService:
                 data=form_data,
                 files=files,
                 access_token=access_token,
-                debug_endpoint=f"{target}/photos (base64 upload)",
+                debug_endpoint=f"{target}/photos (source upload)",
             )
         else:
-            form_data = {"url": validate_image_url(image_url), "published": "true" if published else "false"}
+            public_url = validate_image_url(image_url)
+            form_data = {"url": public_url, "published": "true" if published else "false"}
             if message:
                 form_data["message"] = message
             return await self._request(

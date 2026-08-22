@@ -6,7 +6,11 @@ import pytest
 from app.config import Settings
 from app.main import app
 from app.services.facebook import FacebookService
-from app.temp_media import cleanup_expired_uploads, delete_temporary_image, store_temporary_image
+from app.temp_media import (
+    cleanup_expired_uploads,
+    delete_temporary_image,
+    store_temporary_image,
+)
 
 
 @pytest.mark.asyncio
@@ -47,4 +51,36 @@ def test_expired_uploads_are_removed(tmp_path):
     os.utime(file_path, (old, old))
     os.utime(tmp_path / stored["file_id"], (old, old))
     assert cleanup_expired_uploads(settings) == 1
+    assert not (tmp_path / stored["file_id"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_mcp_temporary_file_uses_binary_source_and_deletes_after_post(tmp_path, monkeypatch):
+    from app import mcp_server
+
+    settings = Settings(_env_file=None, public_url="https://mcp.example", temporary_upload_dir=tmp_path)
+    stored = store_temporary_image(settings, "aGVsbG8=", "photo.jpg", "image/jpeg")
+    captured = {}
+
+    class FakeFacebookService:
+        async def create_photo_post(self, page_id, **kwargs):
+            captured.update(kwargs)
+            return {"id": "1"}
+
+    async def fake_facebook_action(tool, **kwargs):
+        return await kwargs["callback"](FakeFacebookService(), "104823885473411")
+
+    monkeypatch.setattr(mcp_server, "settings", settings)
+    monkeypatch.setattr(mcp_server, "_facebook_action", fake_facebook_action)
+    output = await mcp_server.facebook_create_photo_post(
+        page_id="104823885473411",
+        temporary_file_id=stored["file_id"],
+        published=False,
+    )
+
+    assert output == {"id": "1"}
+    assert captured["image_file_path"].name == "photo.jpg"
+    assert captured["image_url"] is None
+    assert captured["image_base64"] is None
+    assert captured["published"] is False
     assert not (tmp_path / stored["file_id"]).exists()

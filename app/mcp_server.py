@@ -13,19 +13,27 @@ from app.audit import audit_event
 from app.auth import current_actor, current_permissions, current_request_meta
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import AuditLog, OperationLog, SystemSetting
+from app.models import AuditLog, OperationLog
 from app.security import CredentialCipher, require_permission
 from app.services.accounts import AccountRepository, public_account
-from app.services.facebook import FacebookAPIError, FacebookService, redact_facebook_text
+from app.services.facebook import (
+    FacebookAPIError,
+    FacebookService,
+    redact_facebook_text,
+)
 from app.services.facebook_token_manager import FacebookTokenManager
 from app.services.mail import MailService, failure, partial, plain_forward, result
-from app.temp_media import delete_temporary_image, resolve_temporary_image, store_temporary_image
+from app.temp_media import (
+    delete_temporary_image,
+    resolve_temporary_image,
+    store_temporary_image,
+)
 
 settings = get_settings()
 mcp = MCPServer(
     "LFINFO Mail MCP",
     instructions="Production IMAP/SMTP tools protected by OAuth scopes. UIDs are scoped to an account and canonical mailbox. Permanent-delete tools are destructive.",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 TOOL_PERMISSIONS = {
@@ -327,6 +335,11 @@ async def _facebook_action(
         output = await callback(service, resolved_page_id)
         return result(output)
     except Exception as exc:
+        if isinstance(exc, FacebookAPIError):
+            return failure(
+                redact_facebook_text(str(exc)),
+                data=exc.metadata or None,
+            )
         return failure(redact_facebook_text(getattr(exc, "detail", exc)))
 
 
@@ -455,20 +468,17 @@ async def facebook_create_photo_post(
         if not target:
             raise ValueError("A Facebook page_id is required or set FACEBOOK_DEFAULT_PAGE_ID")
         photo_url = image_url
+        photo_path = None
         temporary_id = temporary_file_id
-        if image_base64:
-            stored = store_temporary_image(settings, image_base64, image_filename, image_mime_type)
-            temporary_id = stored["file_id"]
-            photo_url = stored["url"]
-        elif temporary_id:
-            path, _ = resolve_temporary_image(settings, temporary_id)
-            photo_url = f"{settings.public_url.rstrip('/')}/temp-media/{temporary_id}/{path.name}"
+        if temporary_id:
+            photo_path, _ = resolve_temporary_image(settings, temporary_id)
         try:
             return await service.create_photo_post(
                 target,
                 message=message,
                 image_url=photo_url,
-                image_base64=None,
+                image_base64=image_base64,
+                image_file_path=photo_path,
                 image_filename=image_filename,
                 image_mime_type=image_mime_type,
                 published=published,
