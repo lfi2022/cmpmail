@@ -1,9 +1,11 @@
 import contextlib
+import asyncio
 import logging
+import mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -19,6 +21,7 @@ from app.middleware import SecurityMiddleware
 from app.models import MailAccount
 from app.oauth import bootstrap_oauth_user, router as oauth_router
 from app.routers.admin import router as admin_router
+from app.temp_media import cleanup_expired_uploads, resolve_temporary_image
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -45,10 +48,23 @@ mcp_asgi = mcp.streamable_http_app(
 async def lifespan(app: FastAPI):
     Path("data").mkdir(exist_ok=True)
     Path("logs").mkdir(exist_ok=True)
+    settings.temporary_upload_dir.mkdir(parents=True, exist_ok=True)
     async with SessionLocal() as db:
         await bootstrap_oauth_user(settings, db)
-    async with mcp.session_manager.run():
-        yield
+
+    async def purge_uploads():
+        while True:
+            cleanup_expired_uploads(settings)
+            await asyncio.sleep(300)
+
+    cleanup_task = asyncio.create_task(purge_uploads())
+    try:
+        async with mcp.session_manager.run():
+            yield
+    finally:
+        cleanup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await cleanup_task
 
 
 app = FastAPI(
@@ -132,6 +148,19 @@ async def version():
         "mcp_transport": "streamable-http",
         "time": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@app.get("/temp-media/{file_id}/{filename}", include_in_schema=False)
+async def temporary_media(file_id: str, filename: str):
+    if Path(filename).name != filename:
+        raise HTTPException(status_code=404, detail="Temporary file not found")
+    try:
+        path, _ = resolve_temporary_image(settings, file_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Temporary file not found") from exc
+    if path.name != filename:
+        raise HTTPException(status_code=404, detail="Temporary file not found")
+    return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream")
 
 
 app.mount(settings.mcp_path, mcp_asgi, name="mcp")

@@ -19,6 +19,7 @@ from app.services.accounts import AccountRepository, public_account
 from app.services.facebook import FacebookAPIError, FacebookService, redact_facebook_text
 from app.services.facebook_token_manager import FacebookTokenManager
 from app.services.mail import MailService, failure, partial, plain_forward, result
+from app.temp_media import delete_temporary_image, resolve_temporary_image, store_temporary_image
 
 settings = get_settings()
 mcp = MCPServer(
@@ -91,6 +92,7 @@ TOOL_PERMISSIONS = {
     "facebook_get_insights": "facebook.read",
     "facebook_get_notifications": "facebook.read",
     "facebook_health_check": "facebook.read",
+    "upload_temporary_image": "facebook.write",
 }
 
 # Convert the legacy capability names into explicit OAuth scopes. Keeping the
@@ -418,6 +420,20 @@ async def facebook_create_post(
 
 
 @mcp.tool()
+async def upload_temporary_image(
+    image_base64: str,
+    filename: str | None = None,
+    mime_type: str | None = None,
+) -> dict[str, Any]:
+    """Store a short-lived JPEG, PNG, or WEBP for Facebook to download. Permission: facebook.write."""
+    try:
+        require_permission(TOOL_PERMISSIONS["upload_temporary_image"], current_permissions.get(), settings)
+        return result(store_temporary_image(settings, image_base64, filename, mime_type))
+    except Exception as exc:
+        return failure(redact_facebook_text(getattr(exc, "detail", exc)))
+
+
+@mcp.tool()
 async def facebook_create_photo_post(
     page_id: str | None = None,
     message: str | None = None,
@@ -425,27 +441,41 @@ async def facebook_create_photo_post(
     image_base64: str | None = None,
     image_filename: str = "facebook-post.jpg",
     image_mime_type: str | None = None,
+    temporary_file_id: str | None = None,
     published: bool = True,
     access_token: str | None = None,
 ) -> dict[str, Any]:
     """Create a photo post on a Facebook Page. Permission: facebook.write."""
-    if not image_url and not image_base64:
-        return failure("Either image_url or image_base64 must be provided")
+    provided_images = sum(bool(value) for value in (image_url, image_base64, temporary_file_id))
+    if provided_images != 1:
+        return failure("Provide exactly one of image_url, image_base64, or temporary_file_id")
 
     async def action(service: FacebookService, resolved_page_id: str | None):
         target = page_id or resolved_page_id
         if not target:
             raise ValueError("A Facebook page_id is required or set FACEBOOK_DEFAULT_PAGE_ID")
-        return await service.create_photo_post(
-            target,
-            message=message,
-            image_url=image_url,
-            image_base64=image_base64,
-            image_filename=image_filename,
-            image_mime_type=image_mime_type,
-            published=published,
-            access_token=access_token,
-        )
+        temporary_id = temporary_file_id
+        if image_base64:
+            stored = store_temporary_image(settings, image_base64, image_filename, image_mime_type)
+            temporary_id = stored["file_id"]
+            image_url = stored["url"]
+        elif temporary_id:
+            path, _ = resolve_temporary_image(settings, temporary_id)
+            image_url = f"{settings.public_url.rstrip('/')}/temp-media/{temporary_id}/{path.name}"
+        try:
+            return await service.create_photo_post(
+                target,
+                message=message,
+                image_url=image_url,
+                image_base64=None,
+                image_filename=image_filename,
+                image_mime_type=image_mime_type,
+                published=published,
+                access_token=access_token,
+            )
+        finally:
+            if temporary_id:
+                delete_temporary_image(settings, temporary_id)
 
     return await _facebook_action("facebook_create_photo_post", access_token=access_token, page_id=page_id, callback=action)
 
