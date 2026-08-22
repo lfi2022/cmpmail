@@ -7,6 +7,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from app.config import Settings
 
@@ -49,7 +50,7 @@ def _decode_image(image_base64: str, mime_type: str, filename: str | None) -> tu
         raise ValueError("Supported image MIME types are JPEG, PNG, and WEBP")
     encoded, declared_mime = normalize_image_base64(image_base64)
     if declared_mime and declared_mime != mime:
-            raise ValueError("image MIME type does not match the data URL")
+        raise ValueError("image MIME type does not match the data URL")
     try:
         binary = base64.b64decode(encoded, validate=True)
     except (ValueError, binascii.Error) as exc:
@@ -86,7 +87,7 @@ def store_temporary_image(
     image_base64: str,
     filename: str | None = None,
     mime_type: str | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     mime = str(mime_type or mimetypes.guess_type(str(filename or ""))[0] or "image/jpeg").lower()
     binary, safe_name = _decode_image(image_base64, mime, filename)
     token = secrets.token_urlsafe(32)
@@ -97,6 +98,9 @@ def store_temporary_image(
     return {
         "file_id": token,
         "url": f"{settings.public_url.rstrip('/')}/temp-media/{token}/{safe_name}",
+        "filename": safe_name,
+        "mime_type": mime,
+        "size": len(binary),
         "expires_at": expires_at.isoformat(),
     }
 

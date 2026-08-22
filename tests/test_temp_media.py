@@ -1,3 +1,4 @@
+import base64
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -16,7 +17,7 @@ from app.temp_media import (
 
 @pytest.mark.asyncio
 async def test_upload_public_facebook_url_and_cleanup(tmp_path, monkeypatch):
-    settings = Settings(_env_file=None, public_url="https://mcp.example", temporary_upload_dir=tmp_path)
+    settings = Settings(_env_file=None, public_url="https://example.com", temporary_upload_dir=tmp_path)
     from app import main
 
     monkeypatch.setattr(main, "settings", settings)
@@ -27,6 +28,11 @@ async def test_upload_public_facebook_url_and_cleanup(tmp_path, monkeypatch):
         response = await client.get("/temp-media/" + stored["file_id"] + "/photo.png")
     assert response.status_code == 200
     assert response.content == b"\x89PNG\r\n\x1a\n"
+    assert response.headers["cache-control"] == "no-store, max-age=0"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert stored["filename"] == "photo.png"
+    assert stored["mime_type"] == "image/png"
+    assert stored["size"] == 8
 
     calls = []
 
@@ -97,3 +103,27 @@ def test_upload_accepts_data_uri_and_whitespace_wrapped_base64(tmp_path):
     path, _ = resolve_temporary_image(settings, stored["file_id"])
     assert path.read_bytes() == b"\x89PNG\r\n\x1a\n"
     delete_temporary_image(settings, stored["file_id"])
+
+
+def test_upload_rejects_invalid_base64_and_mime(tmp_path):
+    settings = Settings(_env_file=None, temporary_upload_dir=tmp_path)
+    for value, filename, mime_type in (
+        ("not base64", "photo.jpg", "image/jpeg"),
+        ("aGVsbG8=", "photo.svg", "image/svg+xml"),
+    ):
+        try:
+            store_temporary_image(settings, value, filename, mime_type)
+        except ValueError:
+            continue
+        raise AssertionError("Expected invalid image input to be rejected")
+
+
+def test_upload_rejects_oversized_image(tmp_path):
+    settings = Settings(_env_file=None, temporary_upload_dir=tmp_path)
+    oversized = base64.b64encode(b"x" * (10 * 1024 * 1024 + 1)).decode()
+    try:
+        store_temporary_image(settings, oversized, "photo.jpg", "image/jpeg")
+    except ValueError as exc:
+        assert "10 MiB" in str(exc)
+    else:
+        raise AssertionError("Expected oversized image to be rejected")

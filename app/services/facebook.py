@@ -6,6 +6,8 @@ import binascii
 import logging
 import mimetypes
 import re
+import socket
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -128,6 +130,15 @@ def validate_image_url(value: str) -> str:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("image_url must be an absolute HTTP(S) URL")
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    if hostname in {"localhost", "localhost.localdomain", "metadata.google.internal"}:
+        raise ValueError("image_url points to a private or metadata host")
+    try:
+        addresses = {ip_address(item[4][0]) for item in socket.getaddrinfo(hostname, None)}
+    except socket.gaierror as exc:
+        raise ValueError("image_url host could not be resolved") from exc
+    if any(address.is_private or address.is_loopback or address.is_link_local or address.is_reserved for address in addresses):
+        raise ValueError("image_url points to a private or metadata host")
     return url
 
 

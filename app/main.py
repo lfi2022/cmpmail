@@ -1,5 +1,5 @@
-import contextlib
 import asyncio
+import contextlib
 import logging
 import mimetypes
 from datetime import datetime, timezone
@@ -9,9 +9,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from mcp.server.transport_security import TransportSecuritySettings
 from sqlalchemy import func, select
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from mcp.server.transport_security import TransportSecuritySettings
 
 from app import __version__
 from app.config import get_settings
@@ -19,7 +19,8 @@ from app.database import SessionLocal, check_database
 from app.mcp_server import mcp
 from app.middleware import SecurityMiddleware
 from app.models import MailAccount
-from app.oauth import bootstrap_oauth_user, router as oauth_router
+from app.oauth import bootstrap_oauth_user
+from app.oauth import router as oauth_router
 from app.routers.admin import router as admin_router
 from app.temp_media import cleanup_expired_uploads, resolve_temporary_image
 
@@ -160,7 +161,15 @@ async def temporary_media(file_id: str, filename: str):
         raise HTTPException(status_code=404, detail="Temporary file not found") from exc
     if path.name != filename:
         raise HTTPException(status_code=404, detail="Temporary file not found")
-    return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+    return FileResponse(
+        path,
+        media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+        headers={
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 app.mount(settings.mcp_path, mcp_asgi, name="mcp")

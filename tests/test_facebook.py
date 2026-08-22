@@ -54,7 +54,14 @@ def test_facebook_ids_stay_strings_and_are_validated():
 
 def test_image_urls_require_http_or_https():
     assert validate_image_url("https://example.com/image.jpg") == "https://example.com/image.jpg"
-    for invalid in ("file:///tmp/a.jpg", "javascript:alert(1)", "relative.jpg"):
+    for invalid in (
+        "file:///tmp/a.jpg",
+        "javascript:alert(1)",
+        "relative.jpg",
+        "http://localhost/image.jpg",
+        "http://127.0.0.1/image.jpg",
+        "http://10.0.0.1/image.jpg",
+    ):
         try:
             validate_image_url(invalid)
         except ValueError:

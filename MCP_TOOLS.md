@@ -32,6 +32,7 @@ Tous les outils acceptent `account_name` lorsque pertinent; sans valeur, le comp
 - SMTP : `to`, `subject`, `text`, `html`, `cc`, `bcc`, `reply_to`, `attachments`, `headers`. Une PJ vaut `{filename,content_type,content_base64}`.
 - Reply/forward : `mailbox`, `uid`, contenu et destinataires; le forward accepte `include_attachments=false`. Les réponses utilisent `In-Reply-To` et `References`; jamais le sujet seul.
 - Images Facebook : pour une image jointe dans ChatGPT, appeler `upload_temporary_image` avec `image_base64`, `filename` et `mime_type`. Réutiliser ensuite la valeur `file_id` retournée comme `temporary_file_id` dans `facebook_create_photo_post`. Le serveur fournit l'URL HTTPS publique à Meta et supprime le fichier après l'appel Facebook; l'URL expire aussi après 10 minutes. Pour un appel unique, `facebook_create_photo_post` accepte directement `image_base64` et effectue automatiquement ce même transfert temporaire.
+- Le SDK MCP 2.0 utilisé par ce serveur ne fournit pas de paramètre outil natif `file`/`blob` pris en charge automatiquement par ChatGPT. Le Base64 est donc le mode de transfert compatible actuel; une URL HTTP(S) publique peut aussi être fournie directement. Les URLs locales, privées, link-local et metadata sont refusées avant l'envoi à Facebook.
 - Flags autorisés : `\\Seen`, `\\Answered`, `\\Flagged`, `\\Deleted`, `\\Draft`.
 
 Exemple d'appel :
