@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI):
     Path("data").mkdir(exist_ok=True)
     Path("logs").mkdir(exist_ok=True)
     settings.temporary_upload_dir.mkdir(parents=True, exist_ok=True)
+    cleanup_expired_uploads(settings)
     async with SessionLocal() as db:
         await bootstrap_oauth_user(settings, db)
 

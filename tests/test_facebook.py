@@ -99,13 +99,13 @@ async def test_photo_post_uses_source_for_base64_and_temporary_file(tmp_path):
     service._request = fake_request
     await service.create_photo_post(
         "104823885473411",
-        image_base64=base64.b64encode(b"jpeg-bytes").decode(),
+        image_base64=base64.b64encode(b"\xff\xd8\xffjpeg-bytes").decode(),
         image_filename="test.jpg",
         image_mime_type="image/jpeg",
         published=False,
     )
     temporary_path = tmp_path / "test.png"
-    temporary_path.write_bytes(b"png-bytes")
+    temporary_path.write_bytes(b"\x89PNG\r\n\x1a\npng-bytes")
     await service.create_photo_post(
         "104823885473411",
         image_file_path=temporary_path,
@@ -159,7 +159,7 @@ async def test_facebook_error_contains_upload_method_and_graph_details(monkeypat
     with pytest.raises(FacebookAPIError) as raised:
         await service.create_photo_post(
             "104823885473411",
-            image_base64=base64.b64encode(b"jpeg-bytes").decode(),
+            image_base64=base64.b64encode(b"\xff\xd8\xffjpeg-bytes").decode(),
             image_filename="test.jpg",
             image_mime_type="image/jpeg",
         )

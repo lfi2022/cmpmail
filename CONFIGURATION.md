@@ -21,7 +21,7 @@ Variables essentielles :
 | `ALLOW_COPY_IN_READ_ONLY` | seule exception possible au mode lecture seule |
 | `DESTRUCTIVE_OPERATIONS_ENABLED` | coupe les EXPUNGE permanents |
 | `MAX_REQUEST_SIZE_MB`, `MAX_ATTACHMENT_SIZE_MB`, `MAX_RAW_MESSAGE_SIZE_MB` | limites mémoire et données |
-| `TEMPORARY_UPLOAD_DIR`, `TEMPORARY_UPLOAD_TTL_MINUTES` | stockage local et durée de vie des images temporaires; TTL par défaut: 10 minutes |
+| `TEMPORARY_UPLOAD_DIR`, `TEMPORARY_UPLOAD_TTL_MINUTES`, `TEMPORARY_UPLOAD_MAX_BYTES`, `TEMPORARY_UPLOAD_MAX_BASE64_BYTES` | stockage, durée de vie et limites des images temporaires; TTL par défaut: 10 minutes |
 | `ATTACHMENT_SAVE_DIR`, `BLOCKED_ATTACHMENT_TYPES` | racine contrôlée et types MIME interdits |
 
 Après toute modification : `pm2 restart lfinfo-mail-mcp --update-env`.

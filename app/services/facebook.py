@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 import httpx
 
 from app.config import Settings
-from app.temp_media import normalize_image_base64
+from app.temp_media import normalize_image_base64, validate_image_signature
 
 PAGE_FIELDS = (
     "id",
@@ -89,7 +89,6 @@ _SECRET_FIELDS = {
 _PAGE_ID_PATTERN = re.compile(r"^\d+$")
 _OBJECT_ID_PATTERN = re.compile(r"^\d+(?:_\d+)?$")
 _SUPPORTED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
-_MAX_PHOTO_BYTES = 10 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
 
@@ -385,11 +384,12 @@ class FacebookService:
                 filename = image_file_path.name
             if not binary:
                 raise ValueError("image file is empty")
-            if len(binary) > _MAX_PHOTO_BYTES:
-                raise ValueError("image exceeds the 10 MiB upload limit")
+            if len(binary) > self.settings.temporary_upload_max_bytes:
+                raise ValueError("image exceeds the configured upload limit")
             mime = image_mime_type or mimetypes.guess_type(filename)[0] or "image/jpeg"
             if mime not in _SUPPORTED_IMAGE_MIME_TYPES:
                 raise ValueError("Supported image MIME types are JPEG, PNG, and WEBP")
+            validate_image_signature(binary, mime)
             files = {"source": (filename, binary, mime)}
             form_data: dict[str, Any] = {}
             if message:

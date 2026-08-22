@@ -50,7 +50,7 @@ async def test_upload_public_facebook_url_and_cleanup(tmp_path, monkeypatch):
 
 def test_expired_uploads_are_removed(tmp_path):
     settings = Settings(_env_file=None, temporary_upload_dir=tmp_path, temporary_upload_ttl_minutes=10)
-    stored = store_temporary_image(settings, "aGVsbG8=", "photo.jpg", "image/jpeg")
+    stored = store_temporary_image(settings, "/9j/", "photo.jpg", "image/jpeg")
     file_path = next((tmp_path / stored["file_id"]).iterdir())
     old = (datetime.now(timezone.utc) - timedelta(minutes=11)).timestamp()
     import os
@@ -66,7 +66,7 @@ async def test_mcp_temporary_file_uses_binary_source_and_deletes_after_post(tmp_
     from app import mcp_server
 
     settings = Settings(_env_file=None, public_url="https://mcp.example", temporary_upload_dir=tmp_path)
-    stored = store_temporary_image(settings, "aGVsbG8=", "photo.jpg", "image/jpeg")
+    stored = store_temporary_image(settings, "/9j/", "photo.jpg", "image/jpeg")
     captured = {}
 
     class FakeFacebookService:
@@ -124,6 +124,22 @@ def test_upload_rejects_oversized_image(tmp_path):
     try:
         store_temporary_image(settings, oversized, "photo.jpg", "image/jpeg")
     except ValueError as exc:
-        assert "10 MiB" in str(exc)
+        assert "configured upload limit" in str(exc)
     else:
         raise AssertionError("Expected oversized image to be rejected")
+
+
+@pytest.mark.parametrize("size", (50 * 1024, 100 * 1024, 200 * 1024, 500 * 1024, 1024 * 1024, 2 * 1024 * 1024))
+def test_upload_progressive_sizes(size, tmp_path):
+    settings = Settings(_env_file=None, temporary_upload_dir=tmp_path)
+    payload = b"\xff\xd8\xff" + b"x" * (size - 3)
+    stored = store_temporary_image(
+        settings,
+        base64.b64encode(payload).decode(),
+        "sized.jpg",
+        "image/jpeg",
+    )
+    path, _ = resolve_temporary_image(settings, stored["file_id"])
+    assert stored["size"] == size
+    assert path.stat().st_size == size
+    delete_temporary_image(settings, stored["file_id"])
