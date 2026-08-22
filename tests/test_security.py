@@ -66,6 +66,20 @@ def test_facebook_permissions_are_registered():
     assert settings.facebook_default_page_id == "123456"
 
 
+def test_facebook_user_access_token_is_supported():
+    settings = Settings(
+        secret_key="x",
+        encryption_key="x",
+        admin_password_hash="x",
+        facebook_user_access_token="user-token",
+        facebook_page_access_token="page-token",
+        facebook_default_page_id="123456",
+    )
+    assert settings.facebook_user_access_token == "user-token"
+    assert settings.facebook_page_access_token == "page-token"
+    assert settings.facebook_default_page_id == "123456"
+
+
 def test_read_only_blocks_mutation():
     settings = Settings(
         read_only=True, secret_key="x", encryption_key="x", admin_password="x"

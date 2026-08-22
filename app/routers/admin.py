@@ -514,6 +514,7 @@ async def save_facebook_config(
                 "label": str(item.get("label") or "Facebook"),
                 "app_id": str(item.get("app_id") or ""),
                 "app_secret": str(item.get("app_secret") or ""),
+                "user_access_token": str(item.get("user_access_token") or ""),
                 "page_access_token": str(item.get("page_access_token") or ""),
                 "default_page_id": str(item.get("default_page_id") or ""),
                 "pages": [

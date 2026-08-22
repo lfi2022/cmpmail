@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     facebook_graph_api_version: str = "v19.0"
     facebook_app_id: str = ""
     facebook_app_secret: str = ""
+    facebook_user_access_token: str = ""
     facebook_page_access_token: str = ""
     facebook_default_page_id: str | None = None
     rate_limit_per_minute: int = 120
