@@ -22,6 +22,7 @@ Variables essentielles :
 | `DESTRUCTIVE_OPERATIONS_ENABLED` | coupe les EXPUNGE permanents |
 | `MAX_REQUEST_SIZE_MB`, `MAX_ATTACHMENT_SIZE_MB`, `MAX_RAW_MESSAGE_SIZE_MB` | limites mémoire et données |
 | `TEMPORARY_UPLOAD_DIR`, `TEMPORARY_UPLOAD_TTL_MINUTES`, `TEMPORARY_UPLOAD_MAX_BYTES`, `TEMPORARY_UPLOAD_MAX_BASE64_BYTES` | stockage, durée de vie et limites des images temporaires; TTL par défaut: 10 minutes |
+| `TEMPORARY_UPLOAD_OPTIMIZE`, `TEMPORARY_UPLOAD_MAX_DIMENSION`, `TEMPORARY_UPLOAD_JPEG_QUALITY` | optimisation des images; largeur/hauteur maximale 1600 px et qualité JPEG 85 par défaut |
 | `ATTACHMENT_SAVE_DIR`, `BLOCKED_ATTACHMENT_TYPES` | racine contrôlée et types MIME interdits |
 
 Après toute modification : `pm2 restart lfinfo-mail-mcp --update-env`.
@@ -42,4 +43,4 @@ L'interface admin reçoit un User Access Token courte durée, l'échange côté 
 
 Les scopes MCP requis sont `facebook.read`, `facebook.write` et `facebook.moderate`. Les permissions Meta correspondantes doivent être accordées à l'application et au compte administrateur de la Page. Certaines fonctionnalités, en particulier les notifications et les métriques Insights, dépendent de permissions et de métriques toujours disponibles dans la version Graph API configurée ; les erreurs Meta sont renvoyées explicitement sans faux succès.
 
-L'outil `upload_temporary_image` accepte les images JPEG, PNG et WEBP jusqu'à 10 MiB et renvoie une URL publique temporaire basée sur `PUBLIC_URL`. Cette URL est volontairement accessible sans authentification pour permettre son téléchargement par Meta. Configurez `PUBLIC_URL` avec l'URL HTTPS publique du serveur; les fichiers sont purgés après 10 minutes par défaut. `facebook_create_photo_post` accepte aussi `temporary_file_id` et supprime le fichier après l'appel Facebook.
+L'outil `upload_temporary_image` accepte les images JPEG, PNG et WEBP jusqu'à 10 MiB et renvoie une URL publique temporaire basée sur `PUBLIC_URL`. Cette URL est volontairement accessible sans authentification pour permettre son téléchargement par Meta. Configurez `PUBLIC_URL` avec l'URL HTTPS publique du serveur; les fichiers sont purgés après 10 minutes par défaut. Pillow optimise les images réelles de grande taille (maximum 1600 px, qualité JPEG 85) sans agrandir les petites images; `facebook_create_photo_post` accepte aussi `temporary_file_id` et supprime le fichier après l'appel Facebook.

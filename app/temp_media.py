@@ -8,6 +8,7 @@ import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,51 @@ def validate_image_signature(binary: bytes, mime_type: str) -> None:
     }
     if not signatures.get(mime_type, False):
         raise ValueError("image content does not match mime_type")
+
+
+def prepare_image_for_storage(
+    settings: Settings,
+    binary: bytes,
+    mime_type: str,
+    filename: str,
+) -> tuple[bytes, str, str, bool]:
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(BytesIO(binary)) as image:
+            image.load()
+            original_format = image.format
+            if original_format not in {"JPEG", "PNG", "WEBP"}:
+                raise ValueError("image content format is not supported")
+            output_mime = mime_type
+            output_filename = filename
+            needs_resize = max(image.size) > settings.temporary_upload_max_dimension
+            needs_optimize = settings.temporary_upload_optimize and (
+                len(binary) > 512 * 1024 or needs_resize or bool(image.getexif())
+            )
+            if not needs_optimize:
+                return binary, output_mime, output_filename, False
+            image = ImageOps.exif_transpose(image)
+            if needs_resize:
+                image.thumbnail(
+                    (settings.temporary_upload_max_dimension, settings.temporary_upload_max_dimension),
+                    Image.Resampling.LANCZOS,
+                )
+            output = BytesIO()
+            save_kwargs: dict[str, Any] = {"optimize": True}
+            if output_mime == "image/jpeg":
+                if image.mode not in {"RGB", "L"}:
+                    image = image.convert("RGB")
+                save_kwargs["quality"] = settings.temporary_upload_jpeg_quality
+            image.save(output, format=original_format, **save_kwargs)
+            optimized = output.getvalue()
+            if len(optimized) >= len(binary) and not needs_resize:
+                return binary, output_mime, output_filename, False
+            return optimized, output_mime, output_filename, True
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("image decode or optimization failed") from exc
 
 
 def _decode_image(
@@ -111,6 +157,10 @@ def store_temporary_image(
     started = time.perf_counter()
     mime = str(mime_type or mimetypes.guess_type(str(filename or ""))[0] or "image/jpeg").lower()
     binary, safe_name = _decode_image(settings, image_base64, mime, filename)
+    original_size = len(binary)
+    binary, mime, safe_name, optimized = prepare_image_for_storage(
+        settings, binary, mime, safe_name
+    )
     token = secrets.token_urlsafe(32)
     directory = settings.temporary_upload_dir / token
     directory.mkdir(parents=True, exist_ok=False)
@@ -122,9 +172,9 @@ def store_temporary_image(
         "filename": safe_name,
         "mime_type": mime,
         "size": len(binary),
-        "original_size": len(binary),
+        "original_size": original_size,
         "stored_size": len(binary),
-        "optimized": False,
+        "optimized": optimized,
         "expires_at": expires_at.isoformat(),
     }
     logger.info(
@@ -133,7 +183,7 @@ def store_temporary_image(
         mime,
         len(binary),
         len(binary),
-        False,
+        optimized,
         token,
         output["expires_at"],
         (time.perf_counter() - started) * 1000,

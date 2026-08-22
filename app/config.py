@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     temporary_upload_ttl_minutes: int = 10
     temporary_upload_max_bytes: int = 10 * 1024 * 1024
     temporary_upload_max_base64_bytes: int = 14 * 1024 * 1024
+    temporary_upload_optimize: bool = True
+    temporary_upload_max_dimension: int = 1600
+    temporary_upload_jpeg_quality: int = 85
     max_raw_message_size_mb: int = 10
     read_only: bool = False
     allow_copy_in_read_only: bool = False
