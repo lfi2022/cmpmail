@@ -131,6 +131,19 @@ async def test_multipart_upload_endpoint_uses_shared_storage(tmp_path, monkeypat
     assert (tmp_path / payload["file_id"] / "original.png").read_bytes() == image_bytes
 
 
+@pytest.mark.asyncio
+async def test_multipart_upload_is_published_in_openapi():
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
+        response = await client.get("/openapi.json")
+    assert response.status_code == 200
+    operation = response.json()["paths"]["/api/temp-media/upload"]["post"]
+    assert operation["operationId"] == "uploadTemporaryMedia"
+    schema_ref = operation["requestBody"]["content"]["multipart/form-data"]["schema"]["$ref"]
+    schema = response.json()["components"]["schemas"][schema_ref.rsplit("/", 1)[-1]]
+    assert "image_file" in schema["properties"]
+
+
 def test_upload_accepts_data_uri_and_whitespace_wrapped_base64(tmp_path):
     settings = Settings(_env_file=None, temporary_upload_dir=tmp_path)
     stored = store_temporary_image(

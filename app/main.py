@@ -181,7 +181,12 @@ async def temporary_media(file_id: str, filename: str):
     )
 
 
-@app.post("/api/temp-media/upload", include_in_schema=False)
+@app.post(
+    "/api/temp-media/upload",
+    tags=["temporary-media"],
+    operation_id="uploadTemporaryMedia",
+    summary="Upload an image as temporary media",
+)
 async def upload_temporary_media(
     request: Request,
     image_file: Annotated[UploadFile, File(...)],
