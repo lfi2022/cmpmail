@@ -1,4 +1,5 @@
 import email
+import logging
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ from app.temp_media import (
 )
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 mcp = MCPServer(
     "LFINFO Mail MCP",
     instructions="Production IMAP/SMTP tools protected by OAuth scopes. UIDs are scoped to an account and canonical mailbox. Permanent-delete tools are destructive.",
@@ -440,6 +442,12 @@ async def upload_temporary_image(
 ) -> dict[str, Any]:
     """Upload a ChatGPT image for Facebook. Call this first, then pass data.file_id as temporary_file_id to facebook_create_photo_post. Permission: facebook.write."""
     try:
+        logger.debug(
+            "temporary image received base64_length=%d filename=%s mime_type=%s",
+            len(image_base64 or ""),
+            filename,
+            mime_type,
+        )
         require_permission(TOOL_PERMISSIONS["upload_temporary_image"], current_permissions.get(), settings)
         return result(store_temporary_image(settings, image_base64, filename, mime_type))
     except Exception as exc:

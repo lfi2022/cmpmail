@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import httpx
 
 from app.config import Settings
+from app.temp_media import normalize_image_base64
 
 PAGE_FIELDS = (
     "id",
@@ -357,12 +358,8 @@ class FacebookService:
         if image_base64 or image_file_path:
             filename = image_filename
             if image_base64:
-                encoded = image_base64
-                if encoded.startswith("data:"):
-                    header, separator, encoded = encoded.partition(",")
-                    if not separator or ";base64" not in header.lower():
-                        raise ValueError("image_base64 data URI is invalid")
-                    declared_mime = header[5:].split(";", 1)[0].lower()
+                encoded, declared_mime = normalize_image_base64(image_base64)
+                if declared_mime:
                     if image_mime_type and image_mime_type.lower() != declared_mime:
                         raise ValueError("image MIME type does not match the data URI")
                     image_mime_type = declared_mime

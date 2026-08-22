@@ -9,6 +9,7 @@ from app.services.facebook import FacebookService
 from app.temp_media import (
     cleanup_expired_uploads,
     delete_temporary_image,
+    resolve_temporary_image,
     store_temporary_image,
 )
 
@@ -84,3 +85,15 @@ async def test_mcp_temporary_file_uses_binary_source_and_deletes_after_post(tmp_
     assert captured["image_base64"] is None
     assert captured["published"] is False
     assert not (tmp_path / stored["file_id"]).exists()
+
+
+def test_upload_accepts_data_uri_and_whitespace_wrapped_base64(tmp_path):
+    settings = Settings(_env_file=None, temporary_upload_dir=tmp_path)
+    stored = store_temporary_image(
+        settings,
+        "  data:image/png;base64,\n iVBORw0KGgo= \t\n",
+        "photo.png",
+    )
+    path, _ = resolve_temporary_image(settings, stored["file_id"])
+    assert path.read_bytes() == b"\x89PNG\r\n\x1a\n"
+    delete_temporary_image(settings, stored["file_id"])

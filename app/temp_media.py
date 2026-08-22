@@ -32,17 +32,23 @@ def _safe_filename(filename: str | None, mime_type: str) -> str:
     return f"{stem}{extension}"
 
 
+def normalize_image_base64(image_base64: str) -> tuple[str, str | None]:
+    encoded = str(image_base64 or "").strip()
+    declared_mime = None
+    if encoded.lower().startswith("data:"):
+        header, separator, encoded = encoded.partition(",")
+        if not separator or ";base64" not in header.lower():
+            raise ValueError("image_base64 data URI is invalid")
+        declared_mime = header[5:].split(";", 1)[0].lower()
+    return re.sub(r"\s+", "", encoded), declared_mime
+
+
 def _decode_image(image_base64: str, mime_type: str, filename: str | None) -> tuple[bytes, str]:
     mime = str(mime_type or mimetypes.guess_type(str(filename or ""))[0] or "image/jpeg").lower()
     if mime not in SUPPORTED_IMAGE_MIME_TYPES:
         raise ValueError("Supported image MIME types are JPEG, PNG, and WEBP")
-    encoded = image_base64
-    if encoded.startswith("data:"):
-        header, separator, encoded = encoded.partition(",")
-        if not separator or ";base64" not in header.lower():
-            raise ValueError("image_base64 must contain base64 data")
-        declared_mime = header[5:].split(";", 1)[0].lower()
-        if declared_mime != mime:
+    encoded, declared_mime = normalize_image_base64(image_base64)
+    if declared_mime and declared_mime != mime:
             raise ValueError("image MIME type does not match the data URL")
     try:
         binary = base64.b64decode(encoded, validate=True)
