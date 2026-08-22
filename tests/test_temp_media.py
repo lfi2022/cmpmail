@@ -1,4 +1,5 @@
 import base64
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -234,4 +235,131 @@ def test_preserve_original_keeps_source_bytes(tmp_path):
     assert path.read_bytes() == original
     assert stored["optimized"] is False
     assert stored["original_size"] == stored["stored_size"] == len(original)
+    delete_temporary_image(settings, stored["file_id"])
+
+
+@pytest.mark.asyncio
+async def test_remote_image_import_preserves_bytes_and_hash(tmp_path, monkeypatch):
+    from app import temp_media
+
+    image_bytes = base64.b64decode(_encoded_image("PNG"))
+
+    class StreamResponse:
+        status_code = 200
+        is_redirect = False
+
+        @property
+        def headers(self):
+            return {"content-type": "image/png", "content-length": str(len(image_bytes))}
+
+        def raise_for_status(self):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def aiter_bytes(self, chunk_size):
+            yield image_bytes
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def stream(self, *args, **kwargs):
+            return StreamResponse()
+
+    monkeypatch.setattr(temp_media.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(temp_media, "_validate_remote_image_host", lambda url: None)
+    settings = Settings(_env_file=None, temporary_upload_dir=tmp_path)
+    stored = await temp_media.download_temporary_image_from_url(
+        settings, "https://files.example/image.png?secret=value", preserve_original=True
+    )
+    path, _ = resolve_temporary_image(settings, stored["file_id"])
+    assert path.read_bytes() == image_bytes
+    assert stored["sha256"] == hashlib.sha256(image_bytes).hexdigest()
+    assert stored["source_url"] == "https://files.example/image.png?***"
+    assert stored["redirect_count"] == 0
+    delete_temporary_image(settings, stored["file_id"])
+
+
+def test_remote_image_rejects_loopback_destination():
+    from app import temp_media
+
+    try:
+        temp_media._validate_remote_image_host("http://127.0.0.1/image.png")
+    except ValueError as exc:
+        assert "private" in str(exc)
+    else:
+        raise AssertionError("Expected loopback destination to be rejected")
+
+
+@pytest.mark.asyncio
+async def test_remote_image_follows_one_redirect(tmp_path, monkeypatch):
+    from app import temp_media
+
+    image_bytes = base64.b64decode(_encoded_image("PNG"))
+
+    class Response:
+        def __init__(self, status_code, headers, body=b""):
+            self.status_code = status_code
+            self._headers = headers
+            self.body = body
+
+        @property
+        def is_redirect(self):
+            return 300 <= self.status_code < 400
+
+        @property
+        def headers(self):
+            return self._headers
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError("error", request=None, response=None)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def aiter_bytes(self, chunk_size):
+            yield self.body
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.responses = [
+                Response(302, {"location": "https://cdn.example/image.png"}),
+                Response(200, {"content-type": "image/png", "content-length": str(len(image_bytes))}, image_bytes),
+            ]
+            self.index = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def stream(self, *args, **kwargs):
+            response = self.responses[self.index]
+            self.index += 1
+            return response
+
+    monkeypatch.setattr(temp_media.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(temp_media, "_validate_remote_image_host", lambda url: None)
+    settings = Settings(_env_file=None, temporary_upload_dir=tmp_path)
+    stored = await temp_media.download_temporary_image_from_url(
+        settings, "https://source.example/image.png", preserve_original=True
+    )
+    assert stored["redirect_count"] == 1
+    assert stored["sha256"] == hashlib.sha256(image_bytes).hexdigest()
     delete_temporary_image(settings, stored["file_id"])

@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import logging
 import mimetypes
 import re
 import secrets
+import socket
 import time
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from app.config import Settings
 
@@ -55,6 +60,102 @@ def validate_image_signature(binary: bytes, mime_type: str) -> None:
     }
     if not signatures.get(mime_type, False):
         raise ValueError("image content does not match mime_type")
+
+
+def _validate_remote_image_host(url: str) -> None:
+    from urllib.parse import urlparse
+
+    hostname = (urlparse(url).hostname or "").rstrip(".").lower()
+    if hostname in {"localhost", "localhost.localdomain", "metadata.google.internal"}:
+        raise ValueError("image_url points to a private or metadata host")
+    try:
+        addresses = {ip_address(item[4][0]) for item in socket.getaddrinfo(hostname, None)}
+    except socket.gaierror as exc:
+        raise ValueError("image_url host could not be resolved") from exc
+    if any(
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+        or address.is_multicast
+        for address in addresses
+    ):
+        raise ValueError("image_url points to a private or metadata host")
+
+
+def _masked_url(url: str) -> str:
+    from urllib.parse import urlsplit, urlunsplit
+
+    parsed = urlsplit(url)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "***" if parsed.query else "", ""))
+
+
+async def download_temporary_image_from_url(
+    settings: Settings,
+    image_url: str,
+    filename: str | None = None,
+    preserve_original: bool = True,
+) -> dict[str, Any]:
+    from urllib.parse import urljoin
+
+    current_url = image_url.strip()
+    redirect_count = 0
+    chunks = bytearray()
+    content_type = ""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=False) as client:
+        for attempt in range(4):
+            if not current_url or not current_url.lower().startswith(("http://", "https://")):
+                raise ValueError("image_url must be an absolute HTTP(S) URL")
+            _validate_remote_image_host(current_url)
+            logger.info("[TEMP_MEDIA] remote download url=%s redirect_count=%d", _masked_url(current_url), redirect_count)
+            try:
+                stream_context = client.stream("GET", current_url, follow_redirects=False)
+                async with stream_context as streamed:
+                    if streamed.is_redirect:
+                        if redirect_count >= 3 or not streamed.headers.get("location"):
+                            raise ValueError("remote image has too many redirects")
+                        current_url = urljoin(current_url, streamed.headers["location"])
+                        redirect_count += 1
+                        continue
+                    if streamed.status_code in {401, 403}:
+                        raise ValueError("remote image source requires authentication")
+                    streamed.raise_for_status()
+                    content_type = streamed.headers.get("content-type", "").split(";", 1)[0].lower()
+                    if content_type not in SUPPORTED_IMAGE_MIME_TYPES:
+                        raise ValueError("remote image MIME type is not supported")
+                    declared_length = streamed.headers.get("content-length")
+                    if declared_length and int(declared_length) > settings.temporary_upload_max_bytes:
+                        raise ValueError("remote image exceeds the configured upload limit")
+                    async for chunk in streamed.aiter_bytes(1024 * 1024):
+                        chunks.extend(chunk)
+                        if len(chunks) > settings.temporary_upload_max_bytes:
+                            raise ValueError("remote image exceeds the configured upload limit")
+            except httpx.RequestError as exc:
+                raise ValueError("remote image download failed") from exc
+            break
+        else:
+            raise ValueError("remote image has too many redirects")
+    binary = bytes(chunks)
+    validate_image_signature(binary, content_type)
+    safe_name = _safe_filename(filename, content_type)
+    original_size = len(binary)
+    binary, content_type, safe_name, optimized = prepare_image_for_storage(
+        settings, binary, content_type, safe_name, preserve_original
+    )
+    result = store_temporary_binary(settings, binary, safe_name, content_type, True)
+    result.update(
+        {
+            "original_size": original_size,
+            "stored_size": len(binary),
+            "optimized": optimized,
+            "sha256": hashlib.sha256(binary).hexdigest(),
+            "preserve_original": preserve_original,
+            "source_url": _masked_url(image_url),
+            "redirect_count": redirect_count,
+        }
+    )
+    return result
 
 
 def prepare_image_for_storage(

@@ -26,6 +26,7 @@ from app.services.facebook_token_manager import FacebookTokenManager
 from app.services.mail import MailService, failure, partial, plain_forward, result
 from app.temp_media import (
     delete_temporary_image,
+    download_temporary_image_from_url,
     resolve_temporary_image,
     store_temporary_image,
 )
@@ -103,6 +104,7 @@ TOOL_PERMISSIONS = {
     "facebook_get_notifications": "facebook.read",
     "facebook_health_check": "facebook.read",
     "upload_temporary_image": "facebook.write",
+    "upload_temporary_image_from_url": "facebook.write",
 }
 
 # Convert the legacy capability names into explicit OAuth scopes. Keeping the
@@ -451,6 +453,20 @@ async def upload_temporary_image(
         )
         require_permission(TOOL_PERMISSIONS["upload_temporary_image"], current_permissions.get(), settings)
         return result(store_temporary_image(settings, image_base64, filename, mime_type, preserve_original))
+    except Exception as exc:
+        return failure(redact_facebook_text(getattr(exc, "detail", exc)))
+
+
+@mcp.tool()
+async def upload_temporary_image_from_url(
+    image_url: str,
+    filename: str | None = None,
+    preserve_original: bool = True,
+) -> dict[str, Any]:
+    """Download an HTTP(S) image into temporary media, then pass data.file_id to facebook_create_photo_post. Permission: facebook.write."""
+    try:
+        require_permission(TOOL_PERMISSIONS["upload_temporary_image_from_url"], current_permissions.get(), settings)
+        return result(await download_temporary_image_from_url(settings, image_url, filename, preserve_original))
     except Exception as exc:
         return failure(redact_facebook_text(getattr(exc, "detail", exc)))
 

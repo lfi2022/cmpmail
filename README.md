@@ -34,3 +34,13 @@ npm run dev
 ```
 
 Ne démarrez pas Vite en production. Compilez-le avec `npm run build`, puis PM2 lance uniquement FastAPI.
+
+## Importing ChatGPT images by URL
+
+Le tool MCP `upload_temporary_image_from_url` accepte une URL HTTP(S) que le serveur peut télécharger sans cookie ni session ChatGPT. Il suit au maximum trois redirections, vérifie chaque destination contre les réseaux privés, limite la taille et contrôle le MIME ainsi que la signature réelle de l'image.
+
+```json
+{"image_url":"https://example.com/image.png","filename":"image.png","preserve_original":true}
+```
+
+La réponse contient un `file_id` à transmettre à `facebook_create_photo_post` via `temporary_file_id`. Avec `preserve_original=true`, les octets téléchargés et leur SHA-256 sont conservés sans conversion. Une URL ChatGPT n'est pas automatiquement publique: si elle exige des cookies ou une authentification, l'import est refusé. Le Base64 reste le fallback compatible lorsque ChatGPT ne fournit aucune URL exploitable.
