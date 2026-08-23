@@ -54,5 +54,18 @@ L'outil `upload_temporary_image` accepte les images JPEG, PNG et WEBP jusqu'à 1
 | `DOLIBARR_TIMEOUT_SECONDS` | Timeout HTTP par requête, défaut `30` |
 | `DOLIBARR_VERIFY_SSL` | Vérification du certificat TLS, défaut `true` |
 
-Le module s'appuie sur l'API REST officielle de Dolibarr (module `API REST`, framework Restler) : chaque ressource suit le schéma `GET/POST /{resource}`, `GET/PUT/DELETE /{resource}/{id}` et des sous-actions documentées comme `/invoices/{id}/validate`. L'authentification se fait par l'en-tête HTTP `DOLAPIKEY`, jamais en paramètre d'URL. Les scopes MCP sont `dolibarr.read`, `dolibarr.write` et `dolibarr.delete`; ce dernier respecte `DESTRUCTIVE_OPERATIONS_ENABLED` et `READ_ONLY`. Les outils `dolibarr_list`/`dolibarr_get`/`dolibarr_create`/`dolibarr_update`/`dolibarr_delete`/`dolibarr_action` sont génériques et couvrent tout module Dolibarr exposant une classe API (`api_<module>.class.php`); `dolibarr_list_resources` fournit un catalogue indicatif des ressources courantes. Le jeton et les clés (`dolapikey`, `token`) sont systématiquement retirés des réponses et des messages d'erreur journalisés.
+Le module s'appuie sur l'API REST officielle de Dolibarr (module `API REST`, framework Restler) : chaque ressource suit le schéma `GET/POST /{resource}`, `GET/PUT/DELETE /{resource}/{id}` et des sous-actions documentées comme `/invoices/{id}/validate`. L'authentification se fait par l'en-tête HTTP `DOLAPIKEY`, jamais en paramètre d'URL. Les scopes MCP sont `dolibarr.read`, `dolibarr.write` et `dolibarr.delete`; ce dernier respecte `DESTRUCTIVE_OPERATIONS_ENABLED` et `READ_ONLY`. Les outils `dolibarr_list`/`dolibarr_get`/`dolibarr_create`/`dolibarr_update`/`dolibarr_delete`/`dolibarr_action` sont génériques et couvrent tout module Dolibarr exposant une classe API (`api_<module>.class.php`); `dolibarr_list_resources` fournit un catalogue indicatif des ressources courantes.
+
+## Nextcloud
+
+| Variable | Rôle |
+|---|---|
+| `NEXTCLOUD_URL` | URL de base de l'instance, ex. `https://cloud.example.com` |
+| `NEXTCLOUD_USERNAME` | Identifiant du compte Nextcloud géré |
+| `NEXTCLOUD_APP_PASSWORD` | Mot de passe d'application généré dans Paramètres de sécurité > Appareils et sessions (jamais le mot de passe principal, révocable indépendamment) |
+| `NEXTCLOUD_TIMEOUT_SECONDS` | Timeout HTTP par requête, défaut `30` |
+| `NEXTCLOUD_VERIFY_SSL` | Vérification du certificat TLS, défaut `true` |
+| `NEXTCLOUD_MAX_DOWNLOAD_MB` / `NEXTCLOUD_MAX_UPLOAD_MB` | Limites de taille pour les transferts en base64, défaut `25` |
+
+Le module combine WebDAV (fichiers, dossiers, corbeille) et l'API OCS (partages, profil, capabilities) du compte personnel configuré, en authentification HTTP Basic avec le mot de passe d'application. Les scopes MCP sont `nextcloud.read`, `nextcloud.write` et `nextcloud.delete`; ce dernier respecte `DESTRUCTIVE_OPERATIONS_ENABLED`. La suppression normale (`nextcloud_delete`) passe par la corbeille Nextcloud et reste récupérable; seule `nextcloud_delete_trash_item` est irréversible. Les outils génériques `nextcloud_webdav_request` et `nextcloud_ocs_request` couvrent tout endpoint non exposé par un outil dédié (verrouillage, notifications, groupes, etc.). Les fragments d'authentification Basic sont systématiquement retirés des messages d'erreur journalisés. Le jeton et les clés (`dolapikey`, `token`) sont systématiquement retirés des réponses et des messages d'erreur journalisés.
 

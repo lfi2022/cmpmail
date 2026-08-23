@@ -1,4 +1,6 @@
 import email
+import base64
+import binascii
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -29,6 +31,11 @@ from app.services.dolibarr import (
     DolibarrService,
     redact_dolibarr_text,
 )
+from app.services.nextcloud import (
+    NextcloudAPIError,
+    NextcloudService,
+    redact_nextcloud_text,
+)
 from app.services.mail import MailService, failure, partial, plain_forward, result
 from app.temp_media import (
     delete_temporary_image,
@@ -42,7 +49,7 @@ logger = logging.getLogger(__name__)
 mcp = MCPServer(
     "LFINFO Mail MCP",
     instructions="Production IMAP/SMTP tools protected by OAuth scopes. UIDs are scoped to an account and canonical mailbox. Permanent-delete tools are destructive.",
-    version="2.1.0",
+    version="2.2.0",
 )
 
 TOOL_PERMISSIONS = {
@@ -119,6 +126,26 @@ TOOL_PERMISSIONS = {
     "dolibarr_update": "dolibarr.write",
     "dolibarr_delete": "dolibarr.delete",
     "dolibarr_action": "dolibarr.write",
+    "nextcloud_health_check": "nextcloud.read",
+    "nextcloud_list_folder": "nextcloud.read",
+    "nextcloud_get_file_info": "nextcloud.read",
+    "nextcloud_download_file": "nextcloud.read",
+    "nextcloud_upload_file": "nextcloud.write",
+    "nextcloud_create_folder": "nextcloud.write",
+    "nextcloud_move": "nextcloud.write",
+    "nextcloud_copy": "nextcloud.write",
+    "nextcloud_delete": "nextcloud.delete",
+    "nextcloud_list_trash": "nextcloud.read",
+    "nextcloud_restore_trash_item": "nextcloud.write",
+    "nextcloud_delete_trash_item": "nextcloud.delete",
+    "nextcloud_list_shares": "nextcloud.read",
+    "nextcloud_create_share": "nextcloud.write",
+    "nextcloud_update_share": "nextcloud.write",
+    "nextcloud_delete_share": "nextcloud.delete",
+    "nextcloud_get_account_info": "nextcloud.read",
+    "nextcloud_update_account_field": "nextcloud.write",
+    "nextcloud_webdav_request": "nextcloud.write",
+    "nextcloud_ocs_request": "nextcloud.write",
 }
 
 # Convert the legacy capability names into explicit OAuth scopes. Keeping the
@@ -790,6 +817,287 @@ async def dolibarr_action(
         return await service.call_action(resource, object_id, action, method=method, payload=payload)
 
     return await _dolibarr_action("dolibarr_action", do)
+
+
+async def _nextcloud_action(
+    tool: str,
+    callback: Callable[[NextcloudService], Awaitable[Any]],
+) -> dict[str, Any]:
+    try:
+        require_permission(TOOL_PERMISSIONS[tool], current_permissions.get(), settings)
+        service = NextcloudService(settings)
+        output = await callback(service)
+        return result(output)
+    except Exception as exc:
+        if isinstance(exc, NextcloudAPIError):
+            return failure(redact_nextcloud_text(str(exc)), data=exc.metadata or None)
+        return failure(redact_nextcloud_text(getattr(exc, "detail", exc)))
+
+
+@mcp.tool()
+async def nextcloud_health_check() -> dict[str, Any]:
+    """Check Nextcloud configuration and authentication without changing anything. Permission: nextcloud.read."""
+
+    async def action(service: NextcloudService):
+        configured = bool(
+            settings.nextcloud_url and settings.nextcloud_username and settings.nextcloud_app_password
+        )
+        if not configured:
+            return {"configured": False, "reachable": False}
+        await service.get_capabilities()
+        account = await service.get_account_info()
+        account = account if isinstance(account, dict) else {}
+        return {
+            "configured": True,
+            "reachable": True,
+            "user": account.get("id"),
+            "quota": account.get("quota"),
+        }
+
+    return await _nextcloud_action("nextcloud_health_check", action)
+
+
+@mcp.tool()
+async def nextcloud_list_folder(path: str = "", depth: str = "1") -> dict[str, Any]:
+    """List files and folders under path (WebDAV PROPFIND). path="" is the account root. depth is "1" (children) or "infinity" (recursive, if the server allows it). Permission: nextcloud.read."""
+
+    async def action(service: NextcloudService):
+        return await service.list_folder(path, depth=depth)
+
+    return await _nextcloud_action("nextcloud_list_folder", action)
+
+
+@mcp.tool()
+async def nextcloud_get_file_info(path: str) -> dict[str, Any]:
+    """Get metadata (size, mtime, etag, mime type) for one file or folder. Permission: nextcloud.read."""
+
+    async def action(service: NextcloudService):
+        return await service.get_info(path)
+
+    return await _nextcloud_action("nextcloud_get_file_info", action)
+
+
+@mcp.tool()
+async def nextcloud_download_file(path: str) -> dict[str, Any]:
+    """Download a file's content as base64, limited by NEXTCLOUD_MAX_DOWNLOAD_MB. Permission: nextcloud.read."""
+
+    async def action(service: NextcloudService):
+        content, content_type = await service.download_file(path)
+        return {"path": path, "content_type": content_type, "content_base64": base64.b64encode(content).decode()}
+
+    return await _nextcloud_action("nextcloud_download_file", action)
+
+
+@mcp.tool()
+async def nextcloud_upload_file(path: str, content_base64: str, overwrite: bool = True) -> dict[str, Any]:
+    """Upload or overwrite a file from base64 content, limited by NEXTCLOUD_MAX_UPLOAD_MB. Permission: nextcloud.write."""
+
+    async def action(service: NextcloudService):
+        try:
+            content = base64.b64decode(content_base64, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("content_base64 is not valid base64") from exc
+        return await service.upload_file(path, content, overwrite=overwrite)
+
+    return await _nextcloud_action("nextcloud_upload_file", action)
+
+
+@mcp.tool()
+async def nextcloud_create_folder(path: str) -> dict[str, Any]:
+    """Create a folder (WebDAV MKCOL). The parent folder must already exist. Permission: nextcloud.write."""
+
+    async def action(service: NextcloudService):
+        return await service.create_folder(path)
+
+    return await _nextcloud_action("nextcloud_create_folder", action)
+
+
+@mcp.tool()
+async def nextcloud_move(source_path: str, destination_path: str, overwrite: bool = False) -> dict[str, Any]:
+    """Move or rename a file/folder (WebDAV MOVE). Permission: nextcloud.write."""
+
+    async def action(service: NextcloudService):
+        return await service.move(source_path, destination_path, overwrite=overwrite)
+
+    return await _nextcloud_action("nextcloud_move", action)
+
+
+@mcp.tool()
+async def nextcloud_copy(source_path: str, destination_path: str, overwrite: bool = False) -> dict[str, Any]:
+    """Copy a file/folder (WebDAV COPY). Permission: nextcloud.write."""
+
+    async def action(service: NextcloudService):
+        return await service.copy(source_path, destination_path, overwrite=overwrite)
+
+    return await _nextcloud_action("nextcloud_copy", action)
+
+
+@mcp.tool()
+async def nextcloud_delete(path: str) -> dict[str, Any]:
+    """Delete a file or folder. Nextcloud moves it to the trash (recoverable via nextcloud_list_trash/nextcloud_restore_trash_item) unless the trash app is disabled server-side. Permission: nextcloud.delete."""
+
+    async def action(service: NextcloudService):
+        return await service.delete(path)
+
+    return await _nextcloud_action("nextcloud_delete", action)
+
+
+@mcp.tool()
+async def nextcloud_list_trash() -> dict[str, Any]:
+    """List items currently in the trash. Permission: nextcloud.read."""
+
+    async def action(service: NextcloudService):
+        return await service.list_trash()
+
+    return await _nextcloud_action("nextcloud_list_trash", action)
+
+
+@mcp.tool()
+async def nextcloud_restore_trash_item(trash_filename: str) -> dict[str, Any]:
+    """Restore a trashed item (name as returned by nextcloud_list_trash) to its original location. Permission: nextcloud.write."""
+
+    async def action(service: NextcloudService):
+        return await service.restore_trash_item(trash_filename)
+
+    return await _nextcloud_action("nextcloud_restore_trash_item", action)
+
+
+@mcp.tool()
+async def nextcloud_delete_trash_item(trash_filename: str | None = None) -> dict[str, Any]:
+    """Permanently delete one trashed item, or empty the whole trash when trash_filename is omitted. Irreversible. Permission: nextcloud.delete."""
+
+    async def action(service: NextcloudService):
+        return await service.delete_trash_item(trash_filename)
+
+    return await _nextcloud_action("nextcloud_delete_trash_item", action)
+
+
+@mcp.tool()
+async def nextcloud_list_shares(path: str | None = None) -> dict[str, Any]:
+    """List shares, optionally filtered to one file/folder path. Permission: nextcloud.read."""
+
+    async def action(service: NextcloudService):
+        return await service.list_shares(path)
+
+    return await _nextcloud_action("nextcloud_list_shares", action)
+
+
+@mcp.tool()
+async def nextcloud_create_share(
+    path: str,
+    share_type: int,
+    share_with: str | None = None,
+    permissions: int | None = None,
+    password: str | None = None,
+    expire_date: str | None = None,
+    public_upload: bool = False,
+) -> dict[str, Any]:
+    """Create a share. share_type: 0=user, 1=group, 3=public link, 4=email, 6=federated, 7=circle. permissions is a bitmask (1=read, 2=update, 4=create, 8=delete, 16=share, 31=all). Permission: nextcloud.write."""
+
+    async def action(service: NextcloudService):
+        return await service.create_share(
+            path,
+            share_type,
+            share_with=share_with,
+            permissions=permissions,
+            password=password,
+            expire_date=expire_date,
+            public_upload=public_upload,
+        )
+
+    return await _nextcloud_action("nextcloud_create_share", action)
+
+
+@mcp.tool()
+async def nextcloud_update_share(
+    share_id: str,
+    permissions: int | None = None,
+    password: str | None = None,
+    expire_date: str | None = None,
+    note: str | None = None,
+    public_upload: bool | None = None,
+) -> dict[str, Any]:
+    """Update an existing share's permissions, password, expiry, note or public upload flag. Permission: nextcloud.write."""
+
+    async def action(service: NextcloudService):
+        return await service.update_share(
+            share_id,
+            permissions=permissions,
+            password=password,
+            expire_date=expire_date,
+            note=note,
+            public_upload=public_upload,
+        )
+
+    return await _nextcloud_action("nextcloud_update_share", action)
+
+
+@mcp.tool()
+async def nextcloud_delete_share(share_id: str) -> dict[str, Any]:
+    """Delete a share. Permission: nextcloud.delete."""
+
+    async def action(service: NextcloudService):
+        return await service.delete_share(share_id)
+
+    return await _nextcloud_action("nextcloud_delete_share", action)
+
+
+@mcp.tool()
+async def nextcloud_get_account_info() -> dict[str, Any]:
+    """Get your Nextcloud account profile: display name, email, quota/usage, groups, backend. Permission: nextcloud.read."""
+
+    async def action(service: NextcloudService):
+        return await service.get_account_info()
+
+    return await _nextcloud_action("nextcloud_get_account_info", action)
+
+
+@mcp.tool()
+async def nextcloud_update_account_field(field: str, value: str) -> dict[str, Any]:
+    """Update one self-editable profile field: email, displayname, phone, address, website, twitter, fediverse, organisation, role, headline, biography, language, locale, additional_mail. Permission: nextcloud.write."""
+
+    async def action(service: NextcloudService):
+        return await service.update_account_field(field, value)
+
+    return await _nextcloud_action("nextcloud_update_account_field", action)
+
+
+@mcp.tool()
+async def nextcloud_webdav_request(
+    method: str,
+    path: str = "",
+    headers: dict[str, str] | None = None,
+    content_base64: str | None = None,
+) -> dict[str, Any]:
+    """Advanced escape hatch: call any WebDAV method (PROPFIND, PROPPATCH, MKCOL, MOVE, COPY, LOCK, ...) on {path} under the account's files root, for cases not covered by dedicated tools. Permission: nextcloud.write (nextcloud.delete also required for DELETE)."""
+
+    async def action(service: NextcloudService):
+        if method.upper() == "DELETE":
+            require_permission("nextcloud.delete", current_permissions.get(), settings)
+        try:
+            content = base64.b64decode(content_base64, validate=True) if content_base64 else None
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("content_base64 is not valid base64") from exc
+        return await service.webdav_call(method, path, headers=headers, content=content)
+
+    return await _nextcloud_action("nextcloud_webdav_request", action)
+
+
+@mcp.tool()
+async def nextcloud_ocs_request(
+    method: str,
+    endpoint: str,
+    params: dict[str, Any] | None = None,
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Advanced escape hatch: call any Nextcloud OCS API endpoint (shares, notifications, apps, capabilities, ...) relative to /ocs/v2.php/. Permission: nextcloud.write (nextcloud.delete also required for DELETE)."""
+
+    async def action(service: NextcloudService):
+        if method.upper() == "DELETE":
+            require_permission("nextcloud.delete", current_permissions.get(), settings)
+        return await service.ocs_call(method, endpoint, params=params, data=data)
+
+    return await _nextcloud_action("nextcloud_ocs_request", action)
 
 
 @mcp.tool()

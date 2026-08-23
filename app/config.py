@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     dolibarr_api_key: str = ""
     dolibarr_timeout_seconds: int = 30
     dolibarr_verify_ssl: bool = True
+    nextcloud_url: str = ""
+    nextcloud_username: str = ""
+    nextcloud_app_password: str = ""
+    nextcloud_timeout_seconds: int = 30
+    nextcloud_verify_ssl: bool = True
+    nextcloud_max_download_mb: int = 25
+    nextcloud_max_upload_mb: int = 25
     rate_limit_per_minute: int = 120
     mail_timeout_seconds: int = 30
     log_level: str = "INFO"

@@ -56,6 +56,9 @@ SCOPES = {
     "dolibarr.read": "Read Dolibarr objects (thirdparties, invoices, orders, products, ...)",
     "dolibarr.write": "Create, update and trigger actions on Dolibarr objects",
     "dolibarr.delete": "Permanently delete Dolibarr objects",
+    "nextcloud.read": "Read Nextcloud files, folders, shares and account profile",
+    "nextcloud.write": "Upload, move, copy and share Nextcloud files and folders, edit profile fields",
+    "nextcloud.delete": "Delete Nextcloud files, folders, shares and trash items",
 }
 DEFAULT_SCOPES = [
     "openid",
@@ -65,6 +68,7 @@ DEFAULT_SCOPES = [
     "mail.read",
     "facebook.read",
     "dolibarr.read",
+    "nextcloud.read",
 ]
 
 

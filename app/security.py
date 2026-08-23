@@ -36,6 +36,9 @@ PERMISSIONS = {
     "dolibarr.read",
     "dolibarr.write",
     "dolibarr.delete",
+    "nextcloud.read",
+    "nextcloud.write",
+    "nextcloud.delete",
 }
 MUTATING_PERMISSIONS = {
     "send",
@@ -48,6 +51,8 @@ MUTATING_PERMISSIONS = {
     "facebook.moderate",
     "dolibarr.write",
     "dolibarr.delete",
+    "nextcloud.write",
+    "nextcloud.delete",
 }
 _hasher = PasswordHasher()
 
@@ -128,7 +133,7 @@ def require_permission(permission: str, granted: set[str], settings: Settings) -
                 status.HTTP_403_FORBIDDEN, "Server is in read-only mode"
             )
     if (
-        permission in {"delete", "mail.delete", "dolibarr.delete"}
+        permission in {"delete", "mail.delete", "dolibarr.delete", "nextcloud.delete"}
         and not settings.destructive_operations_enabled
     ):
         raise HTTPException(
