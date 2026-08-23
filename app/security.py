@@ -33,6 +33,9 @@ PERMISSIONS = {
     "facebook.read",
     "facebook.write",
     "facebook.moderate",
+    "dolibarr.read",
+    "dolibarr.write",
+    "dolibarr.delete",
 }
 MUTATING_PERMISSIONS = {
     "send",
@@ -43,6 +46,8 @@ MUTATING_PERMISSIONS = {
     "folders",
     "facebook.write",
     "facebook.moderate",
+    "dolibarr.write",
+    "dolibarr.delete",
 }
 _hasher = PasswordHasher()
 
@@ -123,7 +128,7 @@ def require_permission(permission: str, granted: set[str], settings: Settings) -
                 status.HTTP_403_FORBIDDEN, "Server is in read-only mode"
             )
     if (
-        permission in {"delete", "mail.delete"}
+        permission in {"delete", "mail.delete", "dolibarr.delete"}
         and not settings.destructive_operations_enabled
     ):
         raise HTTPException(

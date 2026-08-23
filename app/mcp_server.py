@@ -23,6 +23,12 @@ from app.services.facebook import (
     redact_facebook_text,
 )
 from app.services.facebook_token_manager import FacebookTokenManager
+from app.services.dolibarr import (
+    RESOURCE_CATALOG,
+    DolibarrAPIError,
+    DolibarrService,
+    redact_dolibarr_text,
+)
 from app.services.mail import MailService, failure, partial, plain_forward, result
 from app.temp_media import (
     delete_temporary_image,
@@ -36,7 +42,7 @@ logger = logging.getLogger(__name__)
 mcp = MCPServer(
     "LFINFO Mail MCP",
     instructions="Production IMAP/SMTP tools protected by OAuth scopes. UIDs are scoped to an account and canonical mailbox. Permanent-delete tools are destructive.",
-    version="2.0.0",
+    version="2.1.0",
 )
 
 TOOL_PERMISSIONS = {
@@ -105,6 +111,14 @@ TOOL_PERMISSIONS = {
     "facebook_health_check": "facebook.read",
     "upload_temporary_image": "facebook.write",
     "upload_temporary_image_from_url": "facebook.write",
+    "dolibarr_health_check": "dolibarr.read",
+    "dolibarr_list_resources": "dolibarr.read",
+    "dolibarr_list": "dolibarr.read",
+    "dolibarr_get": "dolibarr.read",
+    "dolibarr_create": "dolibarr.write",
+    "dolibarr_update": "dolibarr.write",
+    "dolibarr_delete": "dolibarr.delete",
+    "dolibarr_action": "dolibarr.write",
 }
 
 # Convert the legacy capability names into explicit OAuth scopes. Keeping the
@@ -657,6 +671,125 @@ async def facebook_health_check(page_id: str | None = None) -> dict[str, Any]:
         return result(health)
     except Exception as exc:
         return failure(redact_facebook_text(getattr(exc, "detail", exc)))
+
+
+async def _dolibarr_action(
+    tool: str,
+    callback: Callable[[DolibarrService], Awaitable[Any]],
+) -> dict[str, Any]:
+    try:
+        require_permission(TOOL_PERMISSIONS[tool], current_permissions.get(), settings)
+        service = DolibarrService(settings)
+        output = await callback(service)
+        return result(output)
+    except Exception as exc:
+        if isinstance(exc, DolibarrAPIError):
+            return failure(redact_dolibarr_text(str(exc)), data=exc.metadata or None)
+        return failure(redact_dolibarr_text(getattr(exc, "detail", exc)))
+
+
+@mcp.tool()
+async def dolibarr_health_check() -> dict[str, Any]:
+    """Check Dolibarr API configuration and connectivity via GET /status. Permission: dolibarr.read."""
+
+    async def action(service: DolibarrService):
+        configured = bool(settings.dolibarr_api_url and settings.dolibarr_api_key)
+        if not configured:
+            return {"configured": False, "reachable": False}
+        status = await service.status()
+        return {"configured": True, "reachable": True, "status": status}
+
+    return await _dolibarr_action("dolibarr_health_check", action)
+
+
+@mcp.tool()
+async def dolibarr_list_resources() -> dict[str, Any]:
+    """List common Dolibarr REST resources usable with dolibarr_list/get/create/update/delete/action. Permission: dolibarr.read."""
+
+    async def action(service: DolibarrService):
+        return dict(RESOURCE_CATALOG)
+
+    return await _dolibarr_action("dolibarr_list_resources", action)
+
+
+@mcp.tool()
+async def dolibarr_list(
+    resource: str,
+    sqlfilters: str | None = None,
+    sortfield: str | None = None,
+    sortorder: str | None = None,
+    limit: int = 100,
+    page: int = 0,
+) -> dict[str, Any]:
+    """List Dolibarr objects: GET /{resource} (e.g. thirdparties, invoices, orders, products). sqlfilters uses Dolibarr's syntax, e.g. (t.email:like:'%@acme.com'). Permission: dolibarr.read."""
+
+    async def action(service: DolibarrService):
+        return await service.list_objects(
+            resource,
+            sqlfilters=sqlfilters,
+            sortfield=sortfield,
+            sortorder=sortorder,
+            limit=limit,
+            page=page,
+        )
+
+    return await _dolibarr_action("dolibarr_list", action)
+
+
+@mcp.tool()
+async def dolibarr_get(resource: str, object_id: str) -> dict[str, Any]:
+    """Get one Dolibarr object: GET /{resource}/{object_id}. Permission: dolibarr.read."""
+
+    async def action(service: DolibarrService):
+        return await service.get_object(resource, object_id)
+
+    return await _dolibarr_action("dolibarr_get", action)
+
+
+@mcp.tool()
+async def dolibarr_create(resource: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Create a Dolibarr object: POST /{resource} with a JSON payload of object fields. Returns the new id. Permission: dolibarr.write."""
+
+    async def action(service: DolibarrService):
+        return await service.create_object(resource, payload)
+
+    return await _dolibarr_action("dolibarr_create", action)
+
+
+@mcp.tool()
+async def dolibarr_update(resource: str, object_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Update a Dolibarr object: PUT /{resource}/{object_id} with the fields to change. Permission: dolibarr.write."""
+
+    async def action(service: DolibarrService):
+        return await service.update_object(resource, object_id, payload)
+
+    return await _dolibarr_action("dolibarr_update", action)
+
+
+@mcp.tool()
+async def dolibarr_delete(resource: str, object_id: str) -> dict[str, Any]:
+    """Permanently delete a Dolibarr object: DELETE /{resource}/{object_id}. Destructive. Permission: dolibarr.delete."""
+
+    async def action(service: DolibarrService):
+        return await service.delete_object(resource, object_id)
+
+    return await _dolibarr_action("dolibarr_delete", action)
+
+
+@mcp.tool()
+async def dolibarr_action(
+    resource: str,
+    action: str,
+    object_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+    method: str = "POST",
+) -> dict[str, Any]:
+    """Call a documented Dolibarr sub-action, e.g. resource=invoices, object_id=12, action=validate -> POST /invoices/12/validate. Also covers payments, close, approve, settopaid, etc. Permission: dolibarr.write."""
+
+    async def do(service: DolibarrService):
+        return await service.call_action(resource, object_id, action, method=method, payload=payload)
+
+    return await _dolibarr_action("dolibarr_action", do)
 
 
 @mcp.tool()

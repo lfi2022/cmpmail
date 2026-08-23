@@ -53,6 +53,9 @@ SCOPES = {
     "facebook.read": "Read Facebook Page data, posts, comments, notifications and insights",
     "facebook.write": "Create or delete Facebook posts and replies",
     "facebook.moderate": "Hide or moderate Facebook comments and content",
+    "dolibarr.read": "Read Dolibarr objects (thirdparties, invoices, orders, products, ...)",
+    "dolibarr.write": "Create, update and trigger actions on Dolibarr objects",
+    "dolibarr.delete": "Permanently delete Dolibarr objects",
 }
 DEFAULT_SCOPES = [
     "openid",
@@ -61,6 +64,7 @@ DEFAULT_SCOPES = [
     "accounts.read",
     "mail.read",
     "facebook.read",
+    "dolibarr.read",
 ]
 
 

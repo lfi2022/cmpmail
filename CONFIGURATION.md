@@ -44,3 +44,15 @@ L'interface admin reçoit un User Access Token courte durée, l'échange côté 
 Les scopes MCP requis sont `facebook.read`, `facebook.write` et `facebook.moderate`. Les permissions Meta correspondantes doivent être accordées à l'application et au compte administrateur de la Page. Certaines fonctionnalités, en particulier les notifications et les métriques Insights, dépendent de permissions et de métriques toujours disponibles dans la version Graph API configurée ; les erreurs Meta sont renvoyées explicitement sans faux succès.
 
 L'outil `upload_temporary_image` accepte les images JPEG, PNG et WEBP jusqu'à 10 MiB et renvoie une URL publique temporaire basée sur `PUBLIC_URL`. Cette URL est volontairement accessible sans authentification pour permettre son téléchargement par Meta. Configurez `PUBLIC_URL` avec l'URL HTTPS publique du serveur; les fichiers sont purgés après 10 minutes par défaut. Pillow optimise les images réelles de grande taille (maximum 1600 px, qualité JPEG 85) sans agrandir les petites images; `facebook_create_photo_post` accepte aussi `temporary_file_id` et supprime le fichier après l'appel Facebook.
+
+## Dolibarr
+
+| Variable | Rôle |
+|---|---|
+| `DOLIBARR_API_URL` | URL de base de l'API REST Dolibarr, ex. `https://erp.example.com/api/index.php` |
+| `DOLIBARR_API_KEY` | Jeton `DOLAPIKEY` généré sur la fiche d'un utilisateur Dolibarr (module API REST activé) |
+| `DOLIBARR_TIMEOUT_SECONDS` | Timeout HTTP par requête, défaut `30` |
+| `DOLIBARR_VERIFY_SSL` | Vérification du certificat TLS, défaut `true` |
+
+Le module s'appuie sur l'API REST officielle de Dolibarr (module `API REST`, framework Restler) : chaque ressource suit le schéma `GET/POST /{resource}`, `GET/PUT/DELETE /{resource}/{id}` et des sous-actions documentées comme `/invoices/{id}/validate`. L'authentification se fait par l'en-tête HTTP `DOLAPIKEY`, jamais en paramètre d'URL. Les scopes MCP sont `dolibarr.read`, `dolibarr.write` et `dolibarr.delete`; ce dernier respecte `DESTRUCTIVE_OPERATIONS_ENABLED` et `READ_ONLY`. Les outils `dolibarr_list`/`dolibarr_get`/`dolibarr_create`/`dolibarr_update`/`dolibarr_delete`/`dolibarr_action` sont génériques et couvrent tout module Dolibarr exposant une classe API (`api_<module>.class.php`); `dolibarr_list_resources` fournit un catalogue indicatif des ressources courantes. Le jeton et les clés (`dolapikey`, `token`) sont systématiquement retirés des réponses et des messages d'erreur journalisés.
+

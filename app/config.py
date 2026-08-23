@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     facebook_user_access_token: str = ""
     facebook_page_access_token: str = ""
     facebook_default_page_id: str | None = None
+    dolibarr_api_url: str = ""
+    dolibarr_api_key: str = ""
+    dolibarr_timeout_seconds: int = 30
+    dolibarr_verify_ssl: bool = True
     rate_limit_per_minute: int = 120
     mail_timeout_seconds: int = 30
     log_level: str = "INFO"

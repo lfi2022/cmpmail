@@ -21,6 +21,9 @@ Tous les outils acceptent `account_name` lorsque pertinent; sans valeur, le comp
 | SMTP | `send_email`, `reply_email`, `reply_all`, `forward_email` | send | oui, auditée |
 | Pièces jointes | `list_attachments`, `download_attachment`, `save_attachment` | attachments | non |
 | Facebook images | `upload_temporary_image` | facebook.write | oui, temporaire |
+| Dolibarr lecture | `dolibarr_health_check`, `dolibarr_list_resources`, `dolibarr_list`, `dolibarr_get` | dolibarr.read | non |
+| Dolibarr écriture | `dolibarr_create`, `dolibarr_update`, `dolibarr_action` | dolibarr.write | oui |
+| Dolibarr suppression | `dolibarr_delete` | dolibarr.delete | **destructif** |
 
 ## Paramètres et comportements
 
@@ -37,6 +40,7 @@ Tous les outils acceptent `account_name` lorsque pertinent; sans valeur, le comp
 - Pour un connecteur ChatGPT/API capable d'appeler une route multipart, l'upload binaire direct est disponible sur `POST /api/temp-media/upload` avec le champ fichier `image_file`, `preserve_original=true` et le même bearer OAuth que le MCP. La réponse contient `data.file_id`; transmettre cette valeur à `facebook_create_photo_post(temporary_file_id=...)`. Cette route n'est pas un argument MCP `FILE` natif et doit donc être déclarée séparément par le connecteur.
 - La route multipart est publiée dans le schéma OpenAPI à `/openapi.json` sous l'opération `uploadTemporaryMedia`, afin de pouvoir être importée comme Action/API par un connecteur qui accepte les fichiers. Elle reste distincte des outils MCP.
 - Flags autorisés : `\\Seen`, `\\Answered`, `\\Flagged`, `\\Deleted`, `\\Draft`.
+- Dolibarr : le module utilise l'API REST officielle (`{DOLIBARR_API_URL}/{resource}`), authentifiée par l'en-tête `DOLAPIKEY` (jeton généré sur la fiche utilisateur Dolibarr). `dolibarr_list_resources` renvoie un catalogue indicatif de ressources courantes (`thirdparties`, `contacts`, `products`, `invoices`, `orders`, `proposals`, `contracts`, `supplierinvoices`, `supplierorders`, `projects`, `tasks`, `agendaevents`, `adherents`, `users`, `bankaccounts`, `warehouses`, `stockmovements`, `expensereports`, `interventions`, `shipments`, `documents`, `setup/dictionary`, ...), non exhaustif : tout module Dolibarr exposant une classe API (`api_<module>.class.php`) reste accessible via les mêmes outils génériques. `dolibarr_list` accepte `sqlfilters` avec la syntaxe Dolibarr (ex. `(t.email:like:'%@acme.com')`), `sortfield`, `sortorder`, `limit` (≤1000) et `page`. `dolibarr_create`/`dolibarr_update` prennent un `payload` JSON correspondant aux champs de l'objet Dolibarr. `dolibarr_action` couvre les sous-actions documentées (`validate`, `close`, `approve`, `payments`, `settopaid`, `addtimespent`, ...) via `POST /{resource}/{object_id}/{action}`. `dolibarr_delete` est destructif et respecte `DESTRUCTIVE_OPERATIONS_ENABLED`.
 
 Exemple d'appel :
 
