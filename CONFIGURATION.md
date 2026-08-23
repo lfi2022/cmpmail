@@ -67,5 +67,33 @@ Le module s'appuie sur l'API REST officielle de Dolibarr (module `API REST`, fra
 | `NEXTCLOUD_VERIFY_SSL` | Vérification du certificat TLS, défaut `true` |
 | `NEXTCLOUD_MAX_DOWNLOAD_MB` / `NEXTCLOUD_MAX_UPLOAD_MB` | Limites de taille pour les transferts en base64, défaut `25` |
 
-Le module combine WebDAV (fichiers, dossiers, corbeille) et l'API OCS (partages, profil, capabilities) du compte personnel configuré, en authentification HTTP Basic avec le mot de passe d'application. Les scopes MCP sont `nextcloud.read`, `nextcloud.write` et `nextcloud.delete`; ce dernier respecte `DESTRUCTIVE_OPERATIONS_ENABLED`. La suppression normale (`nextcloud_delete`) passe par la corbeille Nextcloud et reste récupérable; seule `nextcloud_delete_trash_item` est irréversible. Les outils génériques `nextcloud_webdav_request` et `nextcloud_ocs_request` couvrent tout endpoint non exposé par un outil dédié (verrouillage, notifications, groupes, etc.). Les fragments d'authentification Basic sont systématiquement retirés des messages d'erreur journalisés. Le jeton et les clés (`dolapikey`, `token`) sont systématiquement retirés des réponses et des messages d'erreur journalisés.
+Le module combine WebDAV (fichiers, dossiers, corbeille) et l'API OCS (partages, profil, capabilities) du compte personnel configuré, en authentification HTTP Basic avec le mot de passe d'application. Les scopes MCP sont `nextcloud.read`, `nextcloud.write` et `nextcloud.delete`; ce dernier respecte `DESTRUCTIVE_OPERATIONS_ENABLED`. La suppression normale (`nextcloud_delete`) passe par la corbeille Nextcloud et reste récupérable; seule `nextcloud_delete_trash_item` est irréversible. Les outils génériques `nextcloud_webdav_request` et `nextcloud_ocs_request` couvrent tout endpoint non exposé par un outil dédié (verrouillage, notifications, groupes, etc.). Les fragments d'authentification Basic sont systématiquement retirés des messages d'erreur journalisés.
+
+## Telegram
+
+| Variable | Rôle |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Jeton du bot obtenu via BotFather |
+| `TELEGRAM_ALLOWED_CHAT_ID` | Identifiant numérique du seul chat autorisé (l'opérateur) |
+
+### Créer le bot
+
+1. Ouvrir une conversation avec [@BotFather](https://t.me/BotFather) sur Telegram.
+2. Envoyer `/newbot`, choisir un nom puis un `username` se terminant par `bot`.
+3. BotFather renvoie le jeton (`123456789:AAAA...`) : le copier dans `TELEGRAM_BOT_TOKEN`.
+
+### Récupérer le chat_id
+
+1. Démarrer une conversation avec le bot nouvellement créé (bouton *Start* ou envoyer `/start`).
+2. Appeler `https://api.telegram.org/bot<TOKEN>/getUpdates` dans un navigateur ou via `curl`, et lire `message.chat.id` dans la réponse JSON (ou utiliser un bot dédié comme `@userinfobot` pour obtenir son propre `chat_id`).
+3. Renseigner cette valeur dans `TELEGRAM_ALLOWED_CHAT_ID`.
+
+### Démarrer et tester
+
+1. Configurer `.env` avec les deux variables ci-dessus, puis redémarrer le service (`pm2 restart lfinfo-mail-mcp --update-env`). Le serveur lance automatiquement une tâche de sondage (`getUpdates` en long polling) au démarrage.
+2. Envoyer `/start` au bot : le menu principal doit s'afficher avec les 10 catégories (Mails, Factures, Dolibarr, Nextcloud, Clients, Partenariats, Facebook, Infrastructure, Rapport, Administration).
+3. Appeler l'outil MCP `telegram_set_commands` (ou attendre le premier `/start`) pour publier la liste de commandes auprès de BotFather.
+4. Tout message provenant d'un autre `chat_id` que celui configuré est ignoré silencieusement — aucune réponse n'est envoyée et rien n'est journalisé au-delà d'un avertissement local.
+
+Le jeton n'est jamais journalisé ni renvoyé dans les réponses d'erreur (toujours redacted via `redact_telegram_text`). Les envois sont limités à environ 3 messages/seconde côté serveur et les erreurs `429 Too Many Requests` de Telegram déclenchent une nouvelle tentative après le délai indiqué par l'API. Le jeton et les clés (`dolapikey`, `token`) sont systématiquement retirés des réponses et des messages d'erreur journalisés.
 

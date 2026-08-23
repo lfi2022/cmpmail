@@ -59,6 +59,8 @@ SCOPES = {
     "nextcloud.read": "Read Nextcloud files, folders, shares and account profile",
     "nextcloud.write": "Upload, move, copy and share Nextcloud files and folders, edit profile fields",
     "nextcloud.delete": "Delete Nextcloud files, folders, shares and trash items",
+    "telegram.read": "Read Telegram bot status, updates and pending button answers",
+    "telegram.write": "Send Telegram messages, reports and inline buttons",
 }
 DEFAULT_SCOPES = [
     "openid",
@@ -69,6 +71,7 @@ DEFAULT_SCOPES = [
     "facebook.read",
     "dolibarr.read",
     "nextcloud.read",
+    "telegram.read",
 ]
 
 

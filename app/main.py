@@ -26,6 +26,7 @@ from app.oauth import router as oauth_router
 from app.routers.admin import router as admin_router
 from app.security import require_permission
 from app.services.mail import result
+from app.telegram_bot import run_telegram_poller
 from app.temp_media import (
     cleanup_expired_uploads,
     resolve_temporary_image,
@@ -68,6 +69,10 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(300)
 
     cleanup_task = asyncio.create_task(purge_uploads())
+    telegram_stop = asyncio.Event()
+    telegram_task = None
+    if settings.telegram_bot_token and settings.telegram_allowed_chat_id:
+        telegram_task = asyncio.create_task(run_telegram_poller(settings, telegram_stop))
     try:
         async with mcp.session_manager.run():
             yield
@@ -75,6 +80,11 @@ async def lifespan(app: FastAPI):
         cleanup_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await cleanup_task
+        if telegram_task is not None:
+            telegram_stop.set()
+            telegram_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await telegram_task
 
 
 app = FastAPI(

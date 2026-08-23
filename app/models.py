@@ -191,3 +191,23 @@ class OAuthRevokedToken(Base):
     revoked_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )
+
+
+class TelegramRequest(Base):
+    """A pending or answered inline-button question sent to the allowed Telegram chat."""
+
+    __tablename__ = "telegram_requests"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(100))
+    text: Mapped[str] = mapped_column(Text)
+    options: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    chat_id: Mapped[str] = mapped_column(String(64))
+    message_id: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    answer: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+

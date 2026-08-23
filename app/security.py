@@ -39,6 +39,8 @@ PERMISSIONS = {
     "nextcloud.read",
     "nextcloud.write",
     "nextcloud.delete",
+    "telegram.read",
+    "telegram.write",
 }
 MUTATING_PERMISSIONS = {
     "send",
@@ -53,6 +55,7 @@ MUTATING_PERMISSIONS = {
     "dolibarr.delete",
     "nextcloud.write",
     "nextcloud.delete",
+    "telegram.write",
 }
 _hasher = PasswordHasher()
 

@@ -36,6 +36,13 @@ from app.services.nextcloud import (
     NextcloudService,
     redact_nextcloud_text,
 )
+from app.services.telegram import (
+    TelegramAPIError,
+    TelegramService,
+    is_allowed_chat,
+    redact_telegram_text,
+)
+from app.telegram_bot import BOT_COMMANDS, create_button_request, get_request, mark_request_delivered
 from app.services.mail import MailService, failure, partial, plain_forward, result
 from app.temp_media import (
     delete_temporary_image,
@@ -49,7 +56,7 @@ logger = logging.getLogger(__name__)
 mcp = MCPServer(
     "LFINFO Mail MCP",
     instructions="Production IMAP/SMTP tools protected by OAuth scopes. UIDs are scoped to an account and canonical mailbox. Permanent-delete tools are destructive.",
-    version="2.2.0",
+    version="2.3.0",
 )
 
 TOOL_PERMISSIONS = {
@@ -146,6 +153,13 @@ TOOL_PERMISSIONS = {
     "nextcloud_update_account_field": "nextcloud.write",
     "nextcloud_webdav_request": "nextcloud.write",
     "nextcloud_ocs_request": "nextcloud.write",
+    "telegram_health_check": "telegram.read",
+    "telegram_send_message": "telegram.write",
+    "telegram_send_report": "telegram.write",
+    "telegram_send_buttons": "telegram.write",
+    "telegram_get_updates": "telegram.read",
+    "telegram_set_commands": "telegram.write",
+    "telegram_get_callback_result": "telegram.read",
 }
 
 # Convert the legacy capability names into explicit OAuth scopes. Keeping the
@@ -1098,6 +1112,137 @@ async def nextcloud_ocs_request(
         return await service.ocs_call(method, endpoint, params=params, data=data)
 
     return await _nextcloud_action("nextcloud_ocs_request", action)
+
+
+async def _telegram_action(
+    tool: str,
+    callback: Callable[[TelegramService], Awaitable[Any]],
+) -> dict[str, Any]:
+    try:
+        require_permission(TOOL_PERMISSIONS[tool], current_permissions.get(), settings)
+        service = TelegramService(settings)
+        output = await callback(service)
+        return result(output)
+    except Exception as exc:
+        if isinstance(exc, TelegramAPIError):
+            return failure(redact_telegram_text(str(exc)), data=exc.metadata or None)
+        return failure(redact_telegram_text(getattr(exc, "detail", exc)))
+
+
+@mcp.tool()
+async def telegram_health_check() -> dict[str, Any]:
+    """Check Telegram bot configuration and authentication without sending anything. Permission: telegram.read."""
+
+    async def action(service: TelegramService):
+        configured = bool(settings.telegram_bot_token and settings.telegram_allowed_chat_id)
+        if not configured:
+            return {"configured": False, "reachable": False}
+        me = await service.get_me()
+        me = me if isinstance(me, dict) else {}
+        return {
+            "configured": True,
+            "reachable": True,
+            "bot_username": me.get("username"),
+            "allowed_chat_configured": bool(settings.telegram_allowed_chat_id),
+        }
+
+    return await _telegram_action("telegram_health_check", action)
+
+
+@mcp.tool()
+async def telegram_send_message(text: str, parse_mode: str = "HTML") -> dict[str, Any]:
+    """Send a plain text message to the allowed Telegram chat. Permission: telegram.write."""
+
+    async def action(service: TelegramService):
+        sent = await service.send_message(text, parse_mode=parse_mode)
+        return {"message_id": (sent or {}).get("message_id")}
+
+    return await _telegram_action("telegram_send_message", action)
+
+
+@mcp.tool()
+async def telegram_send_report(title: str, lines: list[str]) -> dict[str, Any]:
+    """Send a formatted bullet-point report (title + lines) to the allowed Telegram chat. Permission: telegram.write."""
+
+    async def action(service: TelegramService):
+        sent = await service.send_report(title, lines)
+        return {"message_id": (sent or {}).get("message_id")}
+
+    return await _telegram_action("telegram_send_report", action)
+
+
+@mcp.tool()
+async def telegram_send_buttons(
+    text: str,
+    buttons: list[dict[str, str]],
+    kind: str = "generic",
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Send a message with inline buttons (e.g. buttons=[{"label":"🏢 LFINFO","value":"LFINFO"}, {"label":"👤 Personnel","value":"PERSO"}, {"label":"🔀 Mixte","value":"MIXTE"}]). Returns request_id; poll telegram_get_callback_result(request_id) to retrieve the operator's structured choice once tapped. Permission: telegram.write."""
+
+    async def action(service: TelegramService):
+        for button in buttons:
+            if "label" not in button or "value" not in button:
+                raise ValueError("each button requires 'label' and 'value'")
+        request_id, rows = await create_button_request(text, buttons, kind=kind, context=context)
+        sent = await service.send_buttons(text, rows)
+        sent = sent if isinstance(sent, dict) else {}
+        chat = sent.get("chat") or {}
+        await mark_request_delivered(request_id, str(chat.get("id", "")), sent.get("message_id"))
+        return {"request_id": request_id, "message_id": sent.get("message_id")}
+
+    return await _telegram_action("telegram_send_buttons", action)
+
+
+@mcp.tool()
+async def telegram_get_callback_result(request_id: str) -> dict[str, Any]:
+    """Retrieve the structured answer for a telegram_send_buttons request: status is 'pending' or 'answered', with the chosen value once answered. Permission: telegram.read."""
+
+    async def action(service: TelegramService):
+        request = await get_request(request_id)
+        if request is None:
+            raise ValueError(f"Unknown request_id: {request_id}")
+        return {
+            "request_id": request.id,
+            "kind": request.kind,
+            "status": request.status,
+            "answer": request.answer,
+            "context": request.context,
+        }
+
+    return await _telegram_action("telegram_get_callback_result", action)
+
+
+@mcp.tool()
+async def telegram_get_updates(offset: int | None = None, limit: int = 20, timeout: int = 0) -> dict[str, Any]:
+    """Raw getUpdates passthrough, filtered to the allowed chat only (updates from other chats are silently dropped). Mostly for diagnostics; the background poller already dispatches commands and buttons. Permission: telegram.read."""
+
+    async def action(service: TelegramService):
+        capped_timeout = max(0, min(int(timeout), 10))
+        updates = await service.get_updates(offset=offset, limit=limit, timeout=capped_timeout)
+        allowed = []
+        for update in updates or []:
+            chat = (
+                ((update.get("message") or {}).get("chat"))
+                or ((update.get("callback_query") or {}).get("message") or {}).get("chat")
+                or {}
+            )
+            if is_allowed_chat(chat.get("id"), settings.telegram_allowed_chat_id):
+                allowed.append(update)
+        return allowed
+
+    return await _telegram_action("telegram_get_updates", action)
+
+
+@mcp.tool()
+async def telegram_set_commands() -> dict[str, Any]:
+    """Register the bot's standard command list (/start, /menu, /rapport, /mails, /factures, /avalider, /dolibarr, /nextcloud, /status, /help) with BotFather. Permission: telegram.write."""
+
+    async def action(service: TelegramService):
+        await service.set_my_commands(BOT_COMMANDS)
+        return {"commands": BOT_COMMANDS}
+
+    return await _telegram_action("telegram_set_commands", action)
 
 
 @mcp.tool()

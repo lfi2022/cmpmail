@@ -11,6 +11,7 @@ Serveur MCP Mail self-hosted réunissant, dans un seul processus FastAPI, une in
 - IMAP : dossiers RFC 6154, delimiter réel, recherche, MIME, flags, MOVE/COPY avec remappage UID, drafts et suppression explicite.
 - SMTP : TLS/STARTTLS, Message-ID généré avant envoi et copie identique dans Sent.
 - Sécurité : OAuth 2.1/OIDC, PKCE S256, JWT RS256/JWKS, refresh rotation, scopes, sessions HttpOnly, CSRF, trusted hosts, CORS, rate limit et limites de taille.
+- Intégrations : Dolibarr (API REST), Nextcloud (WebDAV + OCS) et Telegram (bot privé mono-chat) via des modules dédiés, voir [MCP_TOOLS.md](MCP_TOOLS.md) et [CONFIGURATION.md](CONFIGURATION.md).
 
 Installation rapide : voir [INSTALL.md](INSTALL.md). OAuth : [OAUTH.md](OAUTH.md). Connexion ChatGPT : [CHATGPT.md](CHATGPT.md). Outils : [MCP_TOOLS.md](MCP_TOOLS.md).
 

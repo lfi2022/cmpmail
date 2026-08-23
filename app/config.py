@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     nextcloud_verify_ssl: bool = True
     nextcloud_max_download_mb: int = 25
     nextcloud_max_upload_mb: int = 25
+    telegram_bot_token: str = ""
+    telegram_allowed_chat_id: str = ""
+    telegram_timeout_seconds: int = 20
+    telegram_poll_timeout_seconds: int = 25
     rate_limit_per_minute: int = 120
     mail_timeout_seconds: int = 30
     log_level: str = "INFO"
