@@ -28,6 +28,7 @@ from app.models import (
 from app.schemas import AccountCreate, AccountUpdate, ApiKeyCreate, LoginRequest
 from app.security import (
     CredentialCipher,
+    MUTATING_PERMISSIONS,
     PERMISSIONS,
     create_api_key,
     verify_secret,
@@ -193,7 +194,14 @@ async def delete_account(name: str, repo: AccountRepository = Depends(repository
 
 @router.post("/accounts/{name}/default", dependencies=[Depends(require_admin)])
 async def set_default(name: str, repo: AccountRepository = Depends(repository)):
-    return public_account(await repo.set_default(name))
+    try:
+        account = await repo.set_default(name)
+        await record_admin_audit(repo.db, "account.default", name)
+        return public_account(account)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.post("/accounts/{name}/test", dependencies=[Depends(require_admin)])
@@ -286,6 +294,24 @@ async def list_keys(db: AsyncSession = Depends(get_db)):
         for k in keys
     ]
 
+
+@router.get("/permissions", dependencies=[Depends(require_admin)])
+async def permissions():
+    """Expose the authoritative permission set to the administration UI."""
+    destructive = {"delete", "mail.delete", "dolibarr.delete", "nextcloud.delete"}
+    extra_mutating = {
+        "accounts.write", "mail.send", "mail.move", "mail.copy", "mail.flags", "mail.folders"
+    }
+    return [
+        {
+            "name": permission,
+            "mutating": permission in MUTATING_PERMISSIONS
+            or permission.endswith(".write")
+            or permission in extra_mutating,
+            "destructive": permission in destructive,
+        }
+        for permission in sorted(PERMISSIONS)
+    ]
 
 @router.post("/api-keys", status_code=201, dependencies=[Depends(require_admin)])
 async def add_key(payload: ApiKeyCreate, db: AsyncSession = Depends(get_db)):
@@ -428,9 +454,12 @@ async def diagnostics(
         checks["tcp_tls_smtp"] = await tcp_check(
             account.smtp_host, account.smtp_port, account.smtp_ssl
         )
-        checks["imap_login_list"] = await MailService(
-            account, repo.cipher, settings
-        ).test()
+        mail_test = await MailService(account, repo.cipher, settings).test()
+        checks["mail_login"] = {
+            "status": "ok" if mail_test.get("success") else "error",
+            "details": mail_test.get("data"),
+            "errors": mail_test.get("errors", []),
+        }
     except Exception as exc:
         checks["mail_account"] = {"status": "error", "error": str(exc)}
     return {
@@ -484,7 +513,7 @@ async def configuration(
         "destructive_operations_enabled": settings.destructive_operations_enabled,
         "facebook": {
             "graph_api_version": settings.facebook_graph_api_version,
-            "credentials_managed_in_frontend": True,
+            "credentials_managed_in_frontend": False,
             "profiles": accounts,
         },
         "oauth": {
