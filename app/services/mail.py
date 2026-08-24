@@ -18,6 +18,8 @@ from imapclient import IMAPClient
 from app.config import Settings
 from app.models import MailAccount
 from app.security import CredentialCipher, safe_destination, sanitize_filename
+from app.temp_files import store_temporary_file
+from app.services.ubl import parse_ubl_invoice
 
 SPECIAL_FLAGS = {
     "\\Sent": "sent",
@@ -700,42 +702,53 @@ class MailService:
         await self._run(self._append_sync, target, msg.as_bytes(), ["\\Draft"])
         return result({"message_id": msg["Message-ID"], "mailbox": target})
 
+    def _attachment_part(self, raw: bytes, index: int) -> Message:
+        msg = email.message_from_bytes(raw, policy=policy.default)
+        parts = list(msg.walk())
+        if index < 0 or index >= len(parts):
+            raise ValueError("attachment index was not found")
+        part = parts[index]
+        if part.get_content_disposition() != "attachment" and not part.get_filename():
+            raise ValueError("index does not identify an attachment")
+        return part
+
     async def list_attachments(self, mailbox: str, uid: int) -> dict[str, Any]:
         message = (await self.get_email(mailbox, uid))["data"]
         return result(message["attachments"])
 
-    async def download_attachment(
-        self, mailbox: str, uid: int, index: int
-    ) -> dict[str, Any]:
+    async def get_attachment(self, mailbox: str, uid: int, index: int) -> dict[str, Any]:
+        """Fetch one attachment into the private temporary-file store, never base64."""
+        canonical = await self.resolve_mailbox(mailbox)
+        raw, _, _ = await self._run(self._fetch_sync, canonical, uid)
+        part = self._attachment_part(raw, index)
+        payload = part.get_payload(decode=True) or b""
+        maximum = min(self.settings.max_attachment_size_mb * 1024 * 1024, self.settings.temporary_file_max_bytes)
+        if len(payload) > maximum:
+            return failure(f"Attachment exceeds configured limit ({maximum} bytes)")
+        filename = sanitize_filename(decode_text(part.get_filename()) or f"attachment-{index}")
+        metadata = store_temporary_file(self.settings, payload, filename, part.get_content_type())
+        data: dict[str, Any] = {"mailbox": canonical, "uid": uid, "index": index, **metadata}
+        if metadata["mime_type"] in {"application/xml", "text/xml"} or filename.lower().endswith(".xml"):
+            parsed = parse_ubl_invoice(payload)
+            if parsed is not None:
+                data["ubl"] = parsed
+        return result(data)
+
+    async def download_attachment(self, mailbox: str, uid: int, index: int) -> dict[str, Any]:
         if not self.settings.attachment_download_enabled:
             return failure("Attachment download is disabled")
         canonical = await self.resolve_mailbox(mailbox)
         raw, _, _ = await self._run(self._fetch_sync, canonical, uid)
-        msg = email.message_from_bytes(raw, policy=policy.default)
-        part = list(msg.walk())[index]
+        part = self._attachment_part(raw, index)
         payload = part.get_payload(decode=True) or b""
         maximum = self.settings.max_attachment_size_mb * 1024 * 1024
         if len(payload) > maximum:
             return failure(f"Attachment exceeds configured limit ({maximum} bytes)")
-        if part.get_content_type().casefold() in {
-            value.casefold() for value in self.settings.blocked_attachment_types
-        }:
+        if part.get_content_type().casefold() in {value.casefold() for value in self.settings.blocked_attachment_types}:
             return failure(f"Attachment type is blocked: {part.get_content_type()}")
-        return result(
-            {
-                "filename": sanitize_filename(
-                    decode_text(part.get_filename()) or "attachment"
-                ),
-                "content_type": part.get_content_type(),
-                "size": len(payload),
-                "encoding": "base64",
-                "content": base64.b64encode(payload).decode(),
-            }
-        )
+        return result({"filename": sanitize_filename(decode_text(part.get_filename()) or "attachment"), "content_type": part.get_content_type(), "size": len(payload), "encoding": "base64", "content": base64.b64encode(payload).decode()})
 
-    async def save_attachment(
-        self, mailbox: str, uid: int, index: int
-    ) -> dict[str, Any]:
+    async def save_attachment(self, mailbox: str, uid: int, index: int) -> dict[str, Any]:
         downloaded = await self.download_attachment(mailbox, uid, index)
         if not downloaded["success"]:
             return downloaded
@@ -744,19 +757,9 @@ class MailService:
         root.mkdir(parents=True, exist_ok=True)
         target = safe_destination(root, data["filename"])
         if target.exists():
-            target = safe_destination(
-                root, f"{target.stem}-{uid}-{index}{target.suffix}"
-            )
+            target = safe_destination(root, f"{target.stem}-{uid}-{index}{target.suffix}")
         await asyncio.to_thread(target.write_bytes, base64.b64decode(data["content"]))
-        return result(
-            {
-                "filename": target.name,
-                "path": str(target),
-                "size": data["size"],
-                "content_type": data["content_type"],
-            }
-        )
-
+        return result({"filename": target.name, "path": str(target), "size": data["size"], "content_type": data["content_type"]})
     async def test_imap(self) -> dict[str, Any]:
         started = datetime.now(timezone.utc)
         mailboxes = await self.list_mailboxes()

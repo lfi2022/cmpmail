@@ -44,6 +44,7 @@ from app.services.telegram import (
 )
 from app.telegram_bot import BOT_COMMANDS, create_button_request, get_request, mark_request_delivered
 from app.services.mail import MailService, failure, partial, plain_forward, result
+from app.temp_files import delete_temporary_file, resolve_temporary_file
 from app.temp_media import (
     delete_temporary_image,
     download_temporary_image_from_url,
@@ -56,7 +57,7 @@ logger = logging.getLogger(__name__)
 mcp = MCPServer(
     "LFINFO Mail MCP",
     instructions="Production IMAP/SMTP tools protected by OAuth scopes. UIDs are scoped to an account and canonical mailbox. Permanent-delete tools are destructive.",
-    version="2.3.0",
+    version="2.4.0",
 )
 
 TOOL_PERMISSIONS = {
@@ -110,6 +111,9 @@ TOOL_PERMISSIONS = {
     "list_attachments": "attachments",
     "download_attachment": "attachments",
     "save_attachment": "attachments",
+    "mail_list_attachments": "attachments",
+    "mail_get_attachment": "attachments",
+    "mail_parse_ubl_temporary_file": "attachments",
     "facebook_list_pages": "facebook.read",
     "facebook_get_page": "facebook.read",
     "facebook_list_posts": "facebook.read",
@@ -133,11 +137,13 @@ TOOL_PERMISSIONS = {
     "dolibarr_update": "dolibarr.write",
     "dolibarr_delete": "dolibarr.delete",
     "dolibarr_action": "dolibarr.write",
+    "dolibarr_attach_temporary_file": "dolibarr.write",
     "nextcloud_health_check": "nextcloud.read",
     "nextcloud_list_folder": "nextcloud.read",
     "nextcloud_get_file_info": "nextcloud.read",
     "nextcloud_download_file": "nextcloud.read",
     "nextcloud_upload_file": "nextcloud.write",
+    "nextcloud_upload_temporary_file": "nextcloud.write",
     "nextcloud_create_folder": "nextcloud.write",
     "nextcloud_move": "nextcloud.write",
     "nextcloud_copy": "nextcloud.write",
@@ -730,6 +736,26 @@ async def _dolibarr_action(
 
 
 @mcp.tool()
+async def dolibarr_attach_temporary_file(
+    temporary_file_id: str,
+    object_id: str,
+    resource: str = "supplierinvoices",
+    modulepart: str | None = None,
+    overwrite: bool = False,
+    consume: bool = False,
+) -> dict[str, Any]:
+    """Attach a private temporary file to an existing Dolibarr object (supplierinvoices by default), without a client-side base64 payload. Permission: dolibarr.write."""
+    async def action(service: DolibarrService):
+        path, metadata = resolve_temporary_file(settings, temporary_file_id)
+        uploaded = await service.attach_file(resource, object_id, path.read_bytes(), metadata["filename"], modulepart=modulepart, overwrite=overwrite)
+        output = {"object_id": object_id, "resource": resource, "temporary_file_id": temporary_file_id, "filename": metadata["filename"], "sha256": metadata["sha256"], "dolibarr": uploaded}
+        if consume:
+            delete_temporary_file(settings, temporary_file_id)
+            output["consumed"] = True
+        return output
+    return await _dolibarr_action("dolibarr_attach_temporary_file", action)
+
+@mcp.tool()
 async def dolibarr_health_check() -> dict[str, Any]:
     """Check Dolibarr API configuration and connectivity via GET /status. Permission: dolibarr.read."""
 
@@ -901,6 +927,35 @@ async def nextcloud_download_file(path: str) -> dict[str, Any]:
 
     return await _nextcloud_action("nextcloud_download_file", action)
 
+
+@mcp.tool()
+async def nextcloud_upload_temporary_file(
+    temporary_file_id: str,
+    destination_path: str,
+    create_missing_folders: bool = True,
+    collision: str = "rename",
+    consume: bool = False,
+) -> dict[str, Any]:
+    """Upload a private temporary file to Nextcloud without base64. collision: error, overwrite, or rename. Permission: nextcloud.write."""
+    async def action(service: NextcloudService):
+        path, metadata = resolve_temporary_file(settings, temporary_file_id)
+        if collision not in {"error", "overwrite", "rename"}:
+            raise ValueError("collision must be error, overwrite, or rename")
+        target = destination_path.rstrip("/")
+        if destination_path.endswith("/"):
+            target = f"{target}/{metadata['filename']}"
+        if collision == "rename":
+            import os
+            parent, name = os.path.split(target)
+            stem, ext = os.path.splitext(name)
+            target = f"{parent}/{stem}-{metadata['sha256'][:8]}{ext}".lstrip("/")
+        uploaded = await service.upload_temporary_file(path, target, create_missing_folders=create_missing_folders, overwrite=collision == "overwrite")
+        uploaded.update({"temporary_file_id": temporary_file_id, "sha256": metadata["sha256"], "filename": metadata["filename"]})
+        if consume:
+            delete_temporary_file(settings, temporary_file_id)
+            uploaded["consumed"] = True
+        return uploaded
+    return await _nextcloud_action("nextcloud_upload_temporary_file", action)
 
 @mcp.tool()
 async def nextcloud_upload_file(path: str, content_base64: str, overwrite: bool = True) -> dict[str, Any]:
@@ -1178,7 +1233,7 @@ async def telegram_send_buttons(
     kind: str = "generic",
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Send a message with inline buttons (e.g. buttons=[{"label":"🏢 LFINFO","value":"LFINFO"}, {"label":"👤 Personnel","value":"PERSO"}, {"label":"🔀 Mixte","value":"MIXTE"}]). Returns request_id; poll telegram_get_callback_result(request_id) to retrieve the operator's structured choice once tapped. Permission: telegram.write."""
+    """Send a message with inline buttons (e.g. buttons=[{"label":"LFINFO","value":"LFINFO"}, {"label":"Personal","value":"PERSO"}, {"label":"Mixed","value":"MIXTE"}]). Returns request_id; poll telegram_get_callback_result(request_id) to retrieve the operator choice. Permission: telegram.write."""
 
     async def action(service: TelegramService):
         for button in buttons:
@@ -2031,6 +2086,34 @@ async def send_draft(mailbox: str, uid: int, account_name: str | None = None):
 
     return await execute("send_draft", account_name, action)
 
+
+@mcp.tool()
+async def mail_list_attachments(mailbox: str, uid: int, account_name: str | None = None):
+    """List attachment metadata for an email. Permission: mail.attachments."""
+    async def action(db, repo, account, service):
+        return await service.list_attachments(mailbox, uid)
+    return await execute("mail_list_attachments", account_name, action)
+
+
+@mcp.tool()
+async def mail_get_attachment(mailbox: str, uid: int, index: int, account_name: str | None = None):
+    """Fetch an attachment into a private temporary file and return temporary_file_id, SHA-256 and optional UBL data; no base64 is returned. Permission: mail.attachments."""
+    async def action(db, repo, account, service):
+        return await service.get_attachment(mailbox, uid, index)
+    return await execute("mail_get_attachment", account_name, action)
+
+
+@mcp.tool()
+async def mail_parse_ubl_temporary_file(temporary_file_id: str) -> dict[str, Any]:
+    """Parse a private XML temporary file as UBL/Peppol and return only fields present in the document. Permission: mail.attachments."""
+    from app.services.ubl import parse_ubl_invoice
+    try:
+        require_permission(TOOL_PERMISSIONS["mail_parse_ubl_temporary_file"], current_permissions.get(), settings)
+        path, metadata = resolve_temporary_file(settings, temporary_file_id)
+        parsed = parse_ubl_invoice(path.read_bytes())
+        return result({"temporary_file_id": temporary_file_id, "sha256": metadata["sha256"], "ubl": parsed}) if parsed else failure("File is not a supported UBL Invoice or CreditNote XML")
+    except Exception as exc:
+        return failure(getattr(exc, "detail", str(exc)))
 
 @mcp.tool()
 async def list_attachments(mailbox: str, uid: int, account_name: str | None = None):

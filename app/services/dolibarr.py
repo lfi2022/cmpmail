@@ -169,6 +169,19 @@ class DolibarrService:
             )
         return redact_dolibarr_data(payload)
 
+    async def attach_file(self, resource: str, object_id: str | int, content: bytes, filename: str, *, modulepart: str | None = None, overwrite: bool = False) -> Any:
+        resource = validate_resource(resource)
+        object_id = validate_object_id(object_id)
+        obj = await self.get_object(resource, object_id)
+        reference = str((obj or {}).get("ref") or (obj or {}).get("ref_ext") or "").strip()
+        if not reference:
+            raise ValueError("Dolibarr object has no reference; cannot attach a document")
+        default_parts = {"supplierinvoices": "supplier_invoice", "invoices": "facture", "orders": "commande", "supplierorders": "commande_fournisseur"}
+        part = modulepart or default_parts.get(resource)
+        if not part:
+            raise ValueError("modulepart is required for this Dolibarr resource")
+        import base64
+        return await self._request("POST", "documents/upload", json_body={"modulepart": part, "ref": reference, "filename": filename, "filecontent": base64.b64encode(content).decode(), "overwriteifexists": 1 if overwrite else 0})
     async def status(self) -> Any:
         """GET /status: confirms the API is reachable and the token is valid."""
         return await self._request("GET", "status")

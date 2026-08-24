@@ -62,3 +62,11 @@ Exemple MOVE :
 ```
 
 Erreurs possibles pour chaque outil : compte/dossier/UID absent, résolution ambiguë, permission refusée, read-only, limite de taille, timeout, erreur IMAP/SMTP ou configuration spéciale manquante. Les docstrings exposées par `tools/list` précisent la permission et le caractère destructif.
+
+## Private attachment hand-off
+
+- `mail_list_attachments` lists attachments. `mail_get_attachment` retrieves one into a private server-side store and returns `temporary_file_id`, filename, MIME type, size, SHA-256, expiry, and parsed UBL data when applicable; it does not return base64.
+- `mail_parse_ubl_temporary_file` parses an XML temporary file only when it is a UBL Invoice or CreditNote. Returned fields are taken from the XML; absent values remain null.
+- `nextcloud_upload_temporary_file` accepts the opaque id, can create missing folders, and supports `collision=error|overwrite|rename`.
+- `dolibarr_attach_temporary_file` attaches the private file to an existing object; it defaults to `supplierinvoices` and resolves the object reference server-side.
+- Private files use `TEMPORARY_FILE_DIR`, `TEMPORARY_FILE_TTL_MINUTES`, and `TEMPORARY_FILE_MAX_BYTES`. They are cleaned automatically and are never publicly served. Legacy temporary media URLs require `TEMPORARY_MEDIA_PUBLIC_ENABLED=true`.

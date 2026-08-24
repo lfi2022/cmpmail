@@ -43,7 +43,7 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://localhost:5173"]
     )
     trusted_proxies: Annotated[list[str], NoDecode] = Field(default_factory=list)
-    attachment_download_enabled: bool = False
+    attachment_download_enabled: bool = True
     max_attachment_size_mb: int = 25
     attachment_save_dir: Path = Path("data/attachments")
     blocked_attachment_types: Annotated[list[str], NoDecode] = Field(
@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     temporary_upload_optimize: bool = True
     temporary_upload_max_dimension: int = 1600
     temporary_upload_jpeg_quality: int = 85
+    temporary_file_dir: Path = Path("data/attachments/temp")
+    temporary_file_ttl_minutes: int = 30
+    temporary_file_max_bytes: int = 25 * 1024 * 1024
+    temporary_media_public_enabled: bool = False
     max_raw_message_size_mb: int = 10
     read_only: bool = False
     allow_copy_in_read_only: bool = False

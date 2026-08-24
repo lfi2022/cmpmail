@@ -29,7 +29,7 @@ def _encoded_image(image_format="JPEG", size=(32, 32), quality=85):
 
 @pytest.mark.asyncio
 async def test_upload_public_facebook_url_and_cleanup(tmp_path, monkeypatch):
-    settings = Settings(_env_file=None, public_url="https://example.com", temporary_upload_dir=tmp_path)
+    settings = Settings(_env_file=None, public_url="https://example.com", temporary_upload_dir=tmp_path, temporary_media_public_enabled=True)
     from app import main
 
     monkeypatch.setattr(main, "settings", settings)

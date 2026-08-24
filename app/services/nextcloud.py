@@ -286,6 +286,26 @@ class NextcloudService:
         response = await self._dav_request("PUT", path, headers=headers, content=content)
         return {"path": path, "status_code": response.status_code}
 
+    async def ensure_folder(self, path: str) -> None:
+        path = validate_path(path)
+        if not path:
+            return
+        current = ""
+        for segment in path.split("/"):
+            current = f"{current}/{segment}".strip("/")
+            try:
+                await self.create_folder(current)
+            except NextcloudAPIError as exc:
+                if exc.status_code not in {405, 409}:
+                    raise
+
+    async def upload_temporary_file(self, local_path, destination_path: str, *, create_missing_folders: bool = True, overwrite: bool = False) -> dict[str, Any]:
+        destination_path = validate_path(destination_path)
+        if not destination_path or destination_path.endswith("/"):
+            raise ValueError("destination_path must include a filename")
+        if create_missing_folders:
+            await self.ensure_folder(destination_path.rsplit("/", 1)[0] if "/" in destination_path else "")
+        return await self.upload_file(destination_path, local_path.read_bytes(), overwrite=overwrite)
     async def create_folder(self, path: str) -> dict[str, Any]:
         path = validate_path(path)
         if not path:

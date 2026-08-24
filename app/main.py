@@ -27,6 +27,7 @@ from app.routers.admin import router as admin_router
 from app.security import require_permission
 from app.services.mail import result
 from app.telegram_bot import run_telegram_poller
+from app.temp_files import cleanup_expired_temporary_files
 from app.temp_media import (
     cleanup_expired_uploads,
     resolve_temporary_image,
@@ -59,13 +60,16 @@ async def lifespan(app: FastAPI):
     Path("data").mkdir(exist_ok=True)
     Path("logs").mkdir(exist_ok=True)
     settings.temporary_upload_dir.mkdir(parents=True, exist_ok=True)
+    settings.temporary_file_dir.mkdir(parents=True, exist_ok=True)
     cleanup_expired_uploads(settings)
+    cleanup_expired_temporary_files(settings)
     async with SessionLocal() as db:
         await bootstrap_oauth_user(settings, db)
 
     async def purge_uploads():
-        while True:
             cleanup_expired_uploads(settings)
+            cleanup_expired_temporary_files(settings)
+            await asyncio.sleep(300)
             await asyncio.sleep(300)
 
     cleanup_task = asyncio.create_task(purge_uploads())
@@ -172,6 +176,8 @@ async def version():
 
 @app.get("/temp-media/{file_id}/{filename}", include_in_schema=False)
 async def temporary_media(file_id: str, filename: str):
+    if not settings.temporary_media_public_enabled:
+        raise HTTPException(status_code=404, detail="Temporary file not found")
     if Path(filename).name != filename:
         raise HTTPException(status_code=404, detail="Temporary file not found")
     try:
