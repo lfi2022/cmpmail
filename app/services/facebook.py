@@ -490,6 +490,54 @@ class FacebookService:
             params["until"] = until
         return await self._request("GET", f"{target}/insights", params=params, access_token=access_token)
 
+    async def token_status(self, user_token: str | None = None) -> dict[str, Any]:
+        token = user_token or self._token()
+        if not (self.settings.facebook_app_id and self.settings.facebook_app_secret):
+            return {"valid": None, "warnings": ["FACEBOOK_APP_ID and FACEBOOK_APP_SECRET are required for token introspection"]}
+        app_token = f"{self.settings.facebook_app_id}|{self.settings.facebook_app_secret}"
+        payload = await self._request("GET", "debug_token", params={"input_token": token}, access_token=app_token)
+        data = payload.get("data", {}) if isinstance(payload, dict) else {}
+        return {"valid": data.get("is_valid"), "app_id": data.get("app_id"), "user_id": data.get("user_id"), "scopes": data.get("scopes", []), "expires_at": data.get("expires_at"), "data_access_expires_at": data.get("data_access_expires_at")}
+
+    async def get_capabilities(self, page_id: str | None = None, access_token: str | None = None) -> dict[str, Any]:
+        pages = await self.list_pages(access_token=access_token)
+        page_rows = pages.get("data", []) if isinstance(pages, dict) else []
+        selected = next((x for x in page_rows if str(x.get("id")) == str(page_id)), None) if page_id else (page_rows[0] if page_rows else None)
+        capabilities = {"posts_read": False, "publish": False, "comments": False, "replies": False, "moderation": False, "insights": False, "messenger": False, "leads": False}
+        warnings = []
+        if not selected:
+            return {"pages": page_rows, "page_id": None, "capabilities": capabilities, "warnings": ["No accessible Page"]}
+        pid = str(selected.get("id"))
+        page_token = str(selected.get("access_token") or access_token or self.access_token or "")
+        for name, operation in {
+            "posts_read": lambda: self.list_posts(pid, limit=1, access_token=page_token),
+            "comments": lambda: self.get_comments(pid, limit=1, access_token=page_token),
+            "insights": lambda: self.get_insights(pid, metric="page_impressions", access_token=page_token),
+            "messenger": lambda: self._request("GET", f"{pid}/conversations", params={"limit": 1}, access_token=page_token),
+            "leads": lambda: self._request("GET", f"{pid}/leadgen_forms", params={"limit": 1}, access_token=page_token),
+        }.items():
+            try:
+                await operation(); capabilities[name] = True
+            except FacebookAPIError: warnings.append(f"{name} is unavailable with the current Meta permissions")
+        capabilities["publish"] = bool(page_token)
+        capabilities["replies"] = capabilities["comments"] and bool(page_token)
+        capabilities["moderation"] = capabilities["comments"] and bool(page_token)
+        return {"pages": page_rows, "page_id": pid, "capabilities": capabilities, "warnings": warnings}
+
+    async def get_recent_comments(self, page_id: str, *, since: str | None = None, limit: int = 25, access_token: str | None = None) -> dict[str, Any]:
+        posts = await self.list_posts(page_id, limit=min(limit, 25), since=since, access_token=access_token)
+        comments = []
+        for post in posts.get("data", []):
+            try:
+                response = await self.get_comments(str(post.get("id")), limit=limit, access_token=access_token)
+                for comment in response.get("data", []): comments.append({**comment, "post_id": post.get("id")})
+            except FacebookAPIError: continue
+        return {"data": comments[:limit], "paging": posts.get("paging", {})}
+
+    async def get_community_inbox(self, page_id: str, *, since: str | None = None, limit: int = 25, access_token: str | None = None) -> dict[str, Any]:
+        comments = await self.get_recent_comments(page_id, since=since, limit=limit, access_token=access_token)
+        notifications = await self.get_notifications(page_id=page_id, limit=limit, access_token=access_token)
+        return {"comments": comments.get("data", []), "notifications": notifications.get("data", []), "warnings": ["Messenger and Lead Ads are returned only when their dedicated Meta permissions are available"]}
     async def get_notifications(
         self,
         *,

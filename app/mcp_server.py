@@ -127,6 +127,11 @@ TOOL_PERMISSIONS = {
     "facebook_get_insights": "facebook.read",
     "facebook_get_notifications": "facebook.read",
     "facebook_health_check": "facebook.read",
+    "facebook_token_status": "facebook.read",
+    "facebook_get_capabilities": "facebook.read",
+    "facebook_get_recent_posts": "facebook.read",
+    "facebook_get_recent_comments": "facebook.read",
+    "facebook_get_community_inbox": "facebook.read",
     "upload_temporary_image": "facebook.write",
     "upload_temporary_image_from_url": "facebook.write",
     "dolibarr_health_check": "dolibarr.read",
@@ -408,6 +413,48 @@ async def _facebook_action(
             )
         return failure(redact_facebook_text(getattr(exc, "detail", exc)))
 
+
+@mcp.tool()
+async def facebook_token_status() -> dict[str, Any]:
+    """Inspect the Meta token safely; never returns the token. Permission: facebook.read."""
+    async def action(service: FacebookService, page_id: str | None):
+        return await service.token_status(await _resolve_facebook_user_token())
+    return await _facebook_action("facebook_token_status", callback=action)
+
+
+@mcp.tool()
+async def facebook_get_capabilities(page_id: str | None = None) -> dict[str, Any]:
+    """Probe read-only Meta capabilities actually available to the configured token. Permission: facebook.read."""
+    async def action(service: FacebookService, resolved_page_id: str | None):
+        return await service.get_capabilities(page_id or resolved_page_id, await _resolve_facebook_user_token())
+    return await _facebook_action("facebook_get_capabilities", page_id=page_id, callback=action)
+
+
+@mcp.tool()
+async def facebook_get_recent_posts(limit: int = 10, before: str | None = None, after: str | None = None, page_id: str | None = None) -> dict[str, Any]:
+    """Read recent Page posts for comparison before publishing. Permission: facebook.read."""
+    async def action(service: FacebookService, resolved_page_id: str | None):
+        if not (page_id or resolved_page_id): raise ValueError("Facebook page_id is required")
+        return await service.list_posts(page_id or resolved_page_id, limit=limit, since=after, until=before)
+    return await _facebook_action("facebook_get_recent_posts", page_id=page_id, callback=action)
+
+
+@mcp.tool()
+async def facebook_get_recent_comments(since: str | None = None, limit: int = 25, page_id: str | None = None) -> dict[str, Any]:
+    """Read recent comments across Page posts. Permission: facebook.read."""
+    async def action(service: FacebookService, resolved_page_id: str | None):
+        if not (page_id or resolved_page_id): raise ValueError("Facebook page_id is required")
+        return await service.get_recent_comments(page_id or resolved_page_id, since=since, limit=limit)
+    return await _facebook_action("facebook_get_recent_comments", page_id=page_id, callback=action)
+
+
+@mcp.tool()
+async def facebook_get_community_inbox(since: str | None = None, limit: int = 25, page_id: str | None = None) -> dict[str, Any]:
+    """Aggregate recent comments and notifications in one read-only call. Permission: facebook.read."""
+    async def action(service: FacebookService, resolved_page_id: str | None):
+        if not (page_id or resolved_page_id): raise ValueError("Facebook page_id is required")
+        return await service.get_community_inbox(page_id or resolved_page_id, since=since, limit=limit)
+    return await _facebook_action("facebook_get_community_inbox", page_id=page_id, callback=action)
 
 @mcp.tool()
 async def facebook_list_pages(access_token: str | None = None) -> dict[str, Any]:
