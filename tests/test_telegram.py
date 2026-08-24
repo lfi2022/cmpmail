@@ -195,3 +195,20 @@ async def test_button_request_roundtrip_records_answer(telegram_db, monkeypatch)
     assert stored.status == "answered"
     assert stored.answer == "LFINFO"
     assert stored.context == {"invoice_id": "INV-1"}
+
+@pytest.mark.asyncio
+async def test_invoice_validation_callback_completes_without_transfer(telegram_db, monkeypatch):
+    request_id, _ = await telegram_bot.create_button_request(
+        "Invoice", [{"label": "Validate", "value": "VALIDATE"}], kind="invoice_validation", context={"temporary_file_id": "unused"}
+    )
+    async def noop(*args, **kwargs): return None
+    monkeypatch.setattr(telegram_bot.TelegramService, "answer_callback_query", noop)
+    monkeypatch.setattr(telegram_bot.TelegramService, "edit_message_text", noop)
+    await telegram_bot._handle_button_answer_callback(TelegramService(_settings()), "cb", "42", 1, request_id, "VALIDATE")
+    stored = await telegram_bot.get_request(request_id)
+    assert stored.status == "completed"
+    assert stored.context["outcome"] == "Invoice marked as validated."
+
+
+def test_invoice_validation_tool_permission_is_registered():
+    assert TOOL_PERMISSIONS["telegram_request_invoice_validation"] == "telegram.write"

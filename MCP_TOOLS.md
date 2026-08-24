@@ -70,3 +70,6 @@ Erreurs possibles pour chaque outil : compte/dossier/UID absent, résolution amb
 - `nextcloud_upload_temporary_file` accepts the opaque id, can create missing folders, and supports `collision=error|overwrite|rename`.
 - `dolibarr_attach_temporary_file` attaches the private file to an existing object; it defaults to `supplierinvoices` and resolves the object reference server-side.
 - Private files use `TEMPORARY_FILE_DIR`, `TEMPORARY_FILE_TTL_MINUTES`, and `TEMPORARY_FILE_MAX_BYTES`. They are cleaned automatically and are never publicly served. Legacy temporary media URLs require `TEMPORARY_MEDIA_PUBLIC_ENABLED=true`.
+## Telegram invoice validation
+
+Use `telegram_request_invoice_validation(temporary_file_id, ...)` after `mail_get_attachment`. It sends a card to the configured private chat with Validate, Review, and Reject actions. When a destination is provided it also offers Send Nextcloud and/or Send Dolibarr. The callback performs only the selected server-side action and updates the Telegram message with the result. This tool requires both `telegram.write` and `mail.attachments`.

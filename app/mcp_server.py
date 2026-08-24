@@ -163,6 +163,7 @@ TOOL_PERMISSIONS = {
     "telegram_send_message": "telegram.write",
     "telegram_send_report": "telegram.write",
     "telegram_send_buttons": "telegram.write",
+    "telegram_request_invoice_validation": "telegram.write",
     "telegram_get_updates": "telegram.read",
     "telegram_set_commands": "telegram.write",
     "telegram_get_callback_result": "telegram.read",
@@ -1225,6 +1226,40 @@ async def telegram_send_report(title: str, lines: list[str]) -> dict[str, Any]:
 
     return await _telegram_action("telegram_send_report", action)
 
+
+@mcp.tool()
+async def telegram_request_invoice_validation(
+    temporary_file_id: str,
+    supplier_name: str | None = None,
+    invoice_number: str | None = None,
+    total_amount: str | None = None,
+    currency: str | None = None,
+    nextcloud_destination_path: str | None = None,
+    dolibarr_supplier_invoice_id: str | None = None,
+    consume_after_transfer: bool = False,
+) -> dict[str, Any]:
+    """Send a private invoice-validation card to Telegram. Buttons validate/review/reject and, when configured, transfer the server-side temporary file to Nextcloud or a supplier invoice in Dolibarr. Permission: telegram.write and mail.attachments."""
+    try:
+        require_permission("mail.attachments", current_permissions.get(), settings)
+        require_permission(TOOL_PERMISSIONS["telegram_request_invoice_validation"], current_permissions.get(), settings)
+        _, metadata = resolve_temporary_file(settings, temporary_file_id)
+        lines = ["Invoice awaiting decision", f"File: {metadata['filename']}"]
+        if supplier_name: lines.append(f"Supplier: {supplier_name}")
+        if invoice_number: lines.append(f"Invoice: {invoice_number}")
+        if total_amount: lines.append(f"Total: {total_amount} {currency or ''}".strip())
+        options = [{"label": "Validate", "value": "VALIDATE"}, {"label": "Review", "value": "REVIEW"}, {"label": "Reject", "value": "REJECT"}]
+        if nextcloud_destination_path: options.append({"label": "Send Nextcloud", "value": "NEXTCLOUD"})
+        if dolibarr_supplier_invoice_id: options.append({"label": "Send Dolibarr", "value": "DOLIBARR"})
+        text = "\n".join(lines)
+        context = {"temporary_file_id": temporary_file_id, "nextcloud_destination_path": nextcloud_destination_path, "dolibarr_supplier_invoice_id": dolibarr_supplier_invoice_id, "consume": consume_after_transfer, "sha256": metadata["sha256"]}
+        request_id, rows = await create_button_request(text, options, kind="invoice_validation", context=context)
+        sent = await TelegramService(settings).send_buttons(text, rows)
+        sent = sent if isinstance(sent, dict) else {}
+        chat = sent.get("chat") or {}
+        await mark_request_delivered(request_id, str(chat.get("id", "")), sent.get("message_id"))
+        return result({"request_id": request_id, "message_id": sent.get("message_id"), "temporary_file_id": temporary_file_id, "options": [item["value"] for item in options]})
+    except Exception as exc:
+        return failure(redact_telegram_text(getattr(exc, "detail", exc)))
 
 @mcp.tool()
 async def telegram_send_buttons(

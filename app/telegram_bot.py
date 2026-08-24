@@ -22,32 +22,34 @@ from app.services.accounts import AccountRepository
 from app.services.dolibarr import DolibarrAPIError, DolibarrService
 from app.services.nextcloud import NextcloudAPIError, NextcloudService
 from app.services.telegram import TelegramAPIError, TelegramService, is_allowed_chat
+from app.temp_files import delete_temporary_file, resolve_temporary_file
+from app.temp_files import delete_temporary_file, resolve_temporary_file
 
 logger = logging.getLogger(__name__)
 
 MENU_ITEMS: list[tuple[str, str]] = [
-    ("📧 Mails", "mails"),
-    ("🧾 Factures", "factures"),
-    ("💰 Dolibarr", "dolibarr"),
-    ("☁️ Nextcloud", "nextcloud"),
-    ("👥 Clients", "clients"),
-    ("🤝 Partenariats", "partenariats"),
-    ("📱 Facebook", "facebook"),
-    ("🖥️ Infrastructure", "infra"),
-    ("📊 Rapport", "rapport"),
-    ("⚙️ Administration", "admin"),
+    ("Ã°Å¸â€œÂ§ Mails", "mails"),
+    ("Ã°Å¸Â§Â¾ Factures", "factures"),
+    ("Ã°Å¸â€™Â° Dolibarr", "dolibarr"),
+    ("Ã¢ËœÂÃ¯Â¸Â Nextcloud", "nextcloud"),
+    ("Ã°Å¸â€˜Â¥ Clients", "clients"),
+    ("Ã°Å¸Â¤Â Partenariats", "partenariats"),
+    ("Ã°Å¸â€œÂ± Facebook", "facebook"),
+    ("Ã°Å¸â€“Â¥Ã¯Â¸Â Infrastructure", "infra"),
+    ("Ã°Å¸â€œÅ  Rapport", "rapport"),
+    ("Ã¢Å¡â„¢Ã¯Â¸Â Administration", "admin"),
 ]
 
 BOT_COMMANDS: list[dict[str, str]] = [
     {"command": "start", "description": "Afficher le menu principal"},
     {"command": "menu", "description": "Afficher le menu principal"},
-    {"command": "rapport", "description": "Rapport global de l'activité"},
-    {"command": "mails", "description": "Résumé des comptes mail"},
-    {"command": "factures", "description": "Factures Dolibarr à traiter"},
-    {"command": "avalider", "description": "Éléments en attente de validation"},
-    {"command": "dolibarr", "description": "État de la connexion Dolibarr"},
-    {"command": "nextcloud", "description": "État de la connexion Nextcloud"},
-    {"command": "status", "description": "État de l'infrastructure"},
+    {"command": "rapport", "description": "Rapport global de l'activitÃƒÂ©"},
+    {"command": "mails", "description": "RÃƒÂ©sumÃƒÂ© des comptes mail"},
+    {"command": "factures", "description": "Factures Dolibarr ÃƒÂ  traiter"},
+    {"command": "avalider", "description": "Ãƒâ€°lÃƒÂ©ments en attente de validation"},
+    {"command": "dolibarr", "description": "Ãƒâ€°tat de la connexion Dolibarr"},
+    {"command": "nextcloud", "description": "Ãƒâ€°tat de la connexion Nextcloud"},
+    {"command": "status", "description": "Ãƒâ€°tat de l'infrastructure"},
     {"command": "help", "description": "Afficher l'aide"},
 ]
 
@@ -68,9 +70,9 @@ async def _section_mails(settings: Settings) -> str:
             repo = AccountRepository(db, CredentialCipher(settings.encryption_key))
             accounts = await repo.list()
         if not accounts:
-            return "Aucun compte mail configuré."
+            return "Aucun compte mail configurÃƒÂ©."
         lines = [
-            f"{'⭐' if a.is_default else '•'} {a.name} ({a.email}) — {'actif' if a.enabled else 'désactivé'}"
+            f"{'Ã¢Â­Â' if a.is_default else 'Ã¢â‚¬Â¢'} {a.name} ({a.email}) Ã¢â‚¬â€ {'actif' if a.enabled else 'dÃƒÂ©sactivÃƒÂ©'}"
             for a in accounts
         ]
         return "\n".join(lines)
@@ -80,7 +82,7 @@ async def _section_mails(settings: Settings) -> str:
 
 async def _section_dolibarr(settings: Settings) -> str:
     if not (settings.dolibarr_api_url and settings.dolibarr_api_key):
-        return "Dolibarr non configuré."
+        return "Dolibarr non configurÃƒÂ©."
     try:
         status = await DolibarrService(settings).status()
         return f"Dolibarr joignable. Statut: {status}"
@@ -92,19 +94,19 @@ async def _section_dolibarr(settings: Settings) -> str:
 
 async def _section_factures(settings: Settings) -> str:
     if not (settings.dolibarr_api_url and settings.dolibarr_api_key):
-        return "Dolibarr non configuré, impossible de lister les factures."
+        return "Dolibarr non configurÃƒÂ©, impossible de lister les factures."
     try:
         invoices = await DolibarrService(settings).list_objects(
             "invoices", sortfield="t.tms", sortorder="DESC", limit=5
         )
         if not invoices:
-            return "Aucune facture récente."
+            return "Aucune facture rÃƒÂ©cente."
         lines = []
         for inv in invoices if isinstance(invoices, list) else []:
             ref = inv.get("ref") if isinstance(inv, dict) else None
             total = inv.get("total_ttc") if isinstance(inv, dict) else None
-            lines.append(f"{ref or '?'} — {total or '?'}")
-        return "\n".join(lines) or "Aucune facture récente."
+            lines.append(f"{ref or '?'} Ã¢â‚¬â€ {total or '?'}")
+        return "\n".join(lines) or "Aucune facture rÃƒÂ©cente."
     except DolibarrAPIError as exc:
         return f"Dolibarr injoignable: {exc}"
     except Exception as exc:
@@ -113,13 +115,13 @@ async def _section_factures(settings: Settings) -> str:
 
 async def _section_clients(settings: Settings) -> str:
     if not (settings.dolibarr_api_url and settings.dolibarr_api_key):
-        return "Dolibarr non configuré, impossible de lister les clients."
+        return "Dolibarr non configurÃƒÂ©, impossible de lister les clients."
     try:
         thirdparties = await DolibarrService(settings).list_objects("thirdparties", limit=5)
         if not thirdparties:
-            return "Aucun client trouvé."
+            return "Aucun client trouvÃƒÂ©."
         names = [tp.get("name") for tp in thirdparties if isinstance(tp, dict) and tp.get("name")]
-        return "\n".join(f"• {name}" for name in names) or "Aucun client trouvé."
+        return "\n".join(f"Ã¢â‚¬Â¢ {name}" for name in names) or "Aucun client trouvÃƒÂ©."
     except DolibarrAPIError as exc:
         return f"Dolibarr injoignable: {exc}"
     except Exception as exc:
@@ -128,14 +130,14 @@ async def _section_clients(settings: Settings) -> str:
 
 async def _section_nextcloud(settings: Settings) -> str:
     if not (settings.nextcloud_url and settings.nextcloud_username and settings.nextcloud_app_password):
-        return "Nextcloud non configuré."
+        return "Nextcloud non configurÃƒÂ©."
     try:
         account = await NextcloudService(settings).get_account_info()
         account = account if isinstance(account, dict) else {}
         quota = account.get("quota") or {}
         used = quota.get("used") if isinstance(quota, dict) else None
         total = quota.get("total") if isinstance(quota, dict) else None
-        return f"Compte {account.get('id', '?')} — quota utilisé: {used or '?'}/{total or '?'}"
+        return f"Compte {account.get('id', '?')} Ã¢â‚¬â€ quota utilisÃƒÂ©: {used or '?'}/{total or '?'}"
     except NextcloudAPIError as exc:
         return f"Nextcloud injoignable: {exc}"
     except Exception as exc:
@@ -144,27 +146,27 @@ async def _section_nextcloud(settings: Settings) -> str:
 
 async def _section_facebook(settings: Settings) -> str:
     if not settings.facebook_app_id:
-        return "Facebook non configuré."
-    default_page = settings.facebook_default_page_id or "(aucune page par défaut)"
-    return f"Application configurée. Page par défaut: {default_page}"
+        return "Facebook non configurÃƒÂ©."
+    default_page = settings.facebook_default_page_id or "(aucune page par dÃƒÂ©faut)"
+    return f"Application configurÃƒÂ©e. Page par dÃƒÂ©faut: {default_page}"
 
 
 async def _section_partenariats() -> str:
-    return "Aucune source de données de partenariats connectée pour le moment."
+    return "Aucune source de donnÃƒÂ©es de partenariats connectÃƒÂ©e pour le moment."
 
 
 async def _section_infra(settings: Settings) -> str:
     db_ok = await check_database()
     return (
-        f"Base de données: {'OK' if db_ok else 'ERREUR'}\n"
+        f"Base de donnÃƒÂ©es: {'OK' if db_ok else 'ERREUR'}\n"
         f"Read-only: {'oui' if settings.read_only else 'non'}\n"
-        f"Opérations destructives: {'activées' if settings.destructive_operations_enabled else 'désactivées'}"
+        f"OpÃƒÂ©rations destructives: {'activÃƒÂ©es' if settings.destructive_operations_enabled else 'dÃƒÂ©sactivÃƒÂ©es'}"
     )
 
 
 async def _section_admin(settings: Settings) -> str:
     return (
-        f"OAuth activé: {'oui' if settings.oauth_enabled else 'non'}\n"
+        f"OAuth activÃƒÂ©: {'oui' if settings.oauth_enabled else 'non'}\n"
         f"Authentification MCP: {'oui' if settings.mcp_auth_enabled else 'non'}\n"
         f"Rate limit: {settings.rate_limit_per_minute}/min"
     )
@@ -250,7 +252,7 @@ async def get_request(request_id: str) -> TelegramRequest | None:
 async def _handle_menu_callback(service: TelegramService, chat_id: str, message_id: int, key: str) -> None:
     text = await build_section(key, service.settings)
     label = _menu_label(key)
-    back_row = [[{"text": "⬅️ Menu", "callback_data": "menu:home"}]]
+    back_row = [[{"text": "Ã¢Â¬â€¦Ã¯Â¸Â Menu", "callback_data": "menu:home"}]]
     if key == "home":
         await service.edit_message_text(chat_id, message_id, "Menu principal :", reply_markup=build_main_menu())
         return
@@ -262,28 +264,88 @@ async def _handle_menu_callback(service: TelegramService, chat_id: str, message_
     )
 
 
-async def _handle_button_answer_callback(
-    service: TelegramService, callback_query_id: str, chat_id: str, message_id: int, request_id: str, value: str
-) -> None:
+async def _process_invoice_action(settings: Settings, context: dict[str, Any], value: str) -> str:
+    """Execute only the explicitly selected invoice hand-off action."""
+    if value == "VALIDATE":
+        return "Invoice marked as validated."
+    if value == "REVIEW":
+        return "Invoice kept for review."
+    if value == "REJECT":
+        return "Invoice marked as rejected; no file was transferred."
+    temporary_file_id = str(context.get("temporary_file_id") or "")
+    path, metadata = resolve_temporary_file(settings, temporary_file_id)
+    if value == "NEXTCLOUD":
+        destination = str(context.get("nextcloud_destination_path") or "")
+        if not destination:
+            raise ValueError("No Nextcloud destination was configured for this request")
+        uploaded = await NextcloudService(settings).upload_temporary_file(path, destination, create_missing_folders=True, overwrite=False)
+        outcome = f"Uploaded to Nextcloud: {uploaded.get('path', destination)}"
+    elif value == "DOLIBARR":
+        object_id = str(context.get("dolibarr_supplier_invoice_id") or "")
+        if not object_id:
+            raise ValueError("No Dolibarr supplier invoice was configured for this request")
+        await DolibarrService(settings).attach_file("supplierinvoices", object_id, path.read_bytes(), metadata["filename"], modulepart="supplier_invoice")
+        outcome = f"Attached to Dolibarr supplier invoice {object_id}."
+    else:
+        raise ValueError("Unsupported invoice action")
+    if context.get("consume"):
+        delete_temporary_file(settings, temporary_file_id)
+        outcome += " Temporary file deleted."
+    return outcome
+
+async def _process_invoice_action(settings: Settings, context: dict[str, Any], value: str) -> str:
+    if value == "VALIDATE": return "Invoice marked as validated."
+    if value == "REVIEW": return "Invoice kept for review."
+    if value == "REJECT": return "Invoice marked as rejected; no file was transferred."
+    temporary_file_id = str(context.get("temporary_file_id") or "")
+    path, metadata = resolve_temporary_file(settings, temporary_file_id)
+    if value == "NEXTCLOUD":
+        destination = str(context.get("nextcloud_destination_path") or "")
+        if not destination: raise ValueError("No Nextcloud destination was configured")
+        uploaded = await NextcloudService(settings).upload_temporary_file(path, destination, create_missing_folders=True, overwrite=False)
+        outcome = f"Uploaded to Nextcloud: {uploaded.get('path', destination)}"
+    elif value == "DOLIBARR":
+        object_id = str(context.get("dolibarr_supplier_invoice_id") or "")
+        if not object_id: raise ValueError("No Dolibarr supplier invoice was configured")
+        await DolibarrService(settings).attach_file("supplierinvoices", object_id, path.read_bytes(), metadata["filename"], modulepart="supplier_invoice")
+        outcome = f"Attached to Dolibarr supplier invoice {object_id}."
+    else: raise ValueError("Unsupported invoice action")
+    if context.get("consume"):
+        delete_temporary_file(settings, temporary_file_id)
+        outcome += " Temporary file deleted."
+    return outcome
+
+
+async def _handle_button_answer_callback(service: TelegramService, callback_query_id: str, chat_id: str, message_id: int, request_id: str, value: str) -> None:
     async with SessionLocal() as db:
         request = await db.get(TelegramRequest, request_id)
         if request is None:
-            await service.answer_callback_query(callback_query_id, text="Requête introuvable ou expirée.", show_alert=True)
-            return
+            await service.answer_callback_query(callback_query_id, text="Request not found or expired.", show_alert=True); return
         if request.status != "pending":
-            await service.answer_callback_query(callback_query_id, text="Déjà traité.", show_alert=True)
-            return
+            await service.answer_callback_query(callback_query_id, text="Already processed.", show_alert=True); return
         chosen_label = next((opt.get("label", value) for opt in request.options if opt.get("value") == value), value)
-        request.status = "answered"
+        request.status = "processing" if request.kind == "invoice_validation" else "answered"
         request.answer = value
         request.answered_at = datetime.now(timezone.utc)
+        context = dict(request.context or {})
         await db.commit()
-    await service.answer_callback_query(callback_query_id, text=f"Choix enregistré : {chosen_label}")
-    with_note = f"{request.text}\n\n✅ Réponse : {chosen_label}"
-    try:
-        await service.edit_message_text(chat_id, message_id, with_note)
-    except TelegramAPIError:
-        pass
+    await service.answer_callback_query(callback_query_id, text="Processing..." if request.kind == "invoice_validation" else f"Choice saved: {chosen_label}")
+    outcome = f"Choice: {chosen_label}"
+    if request.kind == "invoice_validation":
+        try:
+            outcome = await _process_invoice_action(service.settings, context, value)
+            async with SessionLocal() as db:
+                stored = await db.get(TelegramRequest, request_id)
+                if stored is not None:
+                    stored.status = "completed"; stored.context = {**context, "outcome": outcome}; await db.commit()
+        except Exception as exc:
+            outcome = f"Action failed: {exc.__class__.__name__}"
+            async with SessionLocal() as db:
+                stored = await db.get(TelegramRequest, request_id)
+                if stored is not None:
+                    stored.status = "failed"; stored.context = {**context, "last_error": exc.__class__.__name__}; await db.commit()
+    try: await service.edit_message_text(chat_id, message_id, f"{request.text}\n\nResult: {outcome}")
+    except TelegramAPIError: pass
 
 
 async def handle_update(settings: Settings, update: dict[str, Any]) -> None:
@@ -327,7 +389,7 @@ async def handle_update(settings: Settings, update: dict[str, Any]) -> None:
             if command in {"/start", "/menu"}:
                 await service.send_message("Menu principal :", reply_markup=build_main_menu())
             elif command == "/help":
-                help_text = "\n".join(f"/{c['command']} — {c['description']}" for c in BOT_COMMANDS)
+                help_text = "\n".join(f"/{c['command']} Ã¢â‚¬â€ {c['description']}" for c in BOT_COMMANDS)
                 await service.send_message(help_text)
             elif command == "/rapport":
                 await service.send_report("Rapport global", (await build_section("rapport", settings)).split("\n"))
@@ -339,7 +401,7 @@ async def handle_update(settings: Settings, update: dict[str, Any]) -> None:
             elif command == "/avalider":
                 pending = await _list_pending_requests()
                 if not pending:
-                    await service.send_message("Aucun élément en attente de validation.")
+                    await service.send_message("Aucun ÃƒÂ©lÃƒÂ©ment en attente de validation.")
                 else:
                     lines = [f"{p.id}: {p.text}" for p in pending]
                     await service.send_report("En attente de validation", lines)
