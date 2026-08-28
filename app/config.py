@@ -86,6 +86,11 @@ class Settings(BaseSettings):
     telegram_allowed_chat_id: str = ""
     telegram_timeout_seconds: int = 20
     telegram_poll_timeout_seconds: int = 25
+    home_assistant_url: str = ""
+    home_assistant_token: str = ""
+    home_assistant_timeout_seconds: int = 30
+    home_assistant_verify_ssl: bool = True
+    home_assistant_websocket_max_size_mb: int = 16
     rate_limit_per_minute: int = 120
     mail_timeout_seconds: int = 30
     log_level: str = "INFO"

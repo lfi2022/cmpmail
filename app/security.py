@@ -41,6 +41,10 @@ PERMISSIONS = {
     "nextcloud.delete",
     "telegram.read",
     "telegram.write",
+    "homeassistant.read",
+    "homeassistant.control",
+    "homeassistant.admin",
+    "homeassistant.delete",
 }
 MUTATING_PERMISSIONS = {
     "send",
@@ -56,6 +60,9 @@ MUTATING_PERMISSIONS = {
     "nextcloud.write",
     "nextcloud.delete",
     "telegram.write",
+    "homeassistant.control",
+    "homeassistant.admin",
+    "homeassistant.delete",
 }
 _hasher = PasswordHasher()
 
@@ -136,7 +143,7 @@ def require_permission(permission: str, granted: set[str], settings: Settings) -
                 status.HTTP_403_FORBIDDEN, "Server is in read-only mode"
             )
     if (
-        permission in {"delete", "mail.delete", "dolibarr.delete", "nextcloud.delete"}
+        permission in {"delete", "mail.delete", "dolibarr.delete", "nextcloud.delete", "homeassistant.delete"}
         and not settings.destructive_operations_enabled
     ):
         raise HTTPException(

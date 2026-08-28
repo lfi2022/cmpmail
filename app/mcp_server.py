@@ -1,6 +1,7 @@
 import email
 import base64
 import binascii
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -35,6 +36,13 @@ from app.services.nextcloud import (
     NextcloudAPIError,
     NextcloudService,
     redact_nextcloud_text,
+)
+from app.services.home_assistant import (
+    READ_ONLY_WEBSOCKET_TYPES,
+    HomeAssistantAPIError,
+    HomeAssistantService,
+    redact_home_assistant_text,
+    validate_entity_id,
 )
 from app.services.telegram import (
     TelegramAPIError,
@@ -172,6 +180,31 @@ TOOL_PERMISSIONS = {
     "telegram_get_updates": "telegram.read",
     "telegram_set_commands": "telegram.write",
     "telegram_get_callback_result": "telegram.read",
+    "home_assistant_health_check": "homeassistant.read",
+    "home_assistant_get_config": "homeassistant.read",
+    "home_assistant_list_entities": "homeassistant.read",
+    "home_assistant_get_entity": "homeassistant.read",
+    "home_assistant_get_entity_registry_entry": "homeassistant.read",
+    "home_assistant_create_entity": "homeassistant.admin",
+    "home_assistant_update_entity": "homeassistant.admin",
+    "home_assistant_update_entity_registry_entry": "homeassistant.admin",
+    "home_assistant_delete_entity": "homeassistant.delete",
+    "home_assistant_delete_entity_registry_entry": "homeassistant.delete",
+    "home_assistant_list_services": "homeassistant.read",
+    "home_assistant_get_history": "homeassistant.read",
+    "home_assistant_get_logbook": "homeassistant.read",
+    "home_assistant_api_get": "homeassistant.read",
+    "home_assistant_websocket_query": "homeassistant.read",
+    "home_assistant_call_service": "homeassistant.control",
+    "home_assistant_fire_event": "homeassistant.control",
+    "home_assistant_render_template": "homeassistant.control",
+    "home_assistant_check_config": "homeassistant.admin",
+    "home_assistant_validate_automation": "homeassistant.admin",
+    "home_assistant_get_managed_config": "homeassistant.read",
+    "home_assistant_set_managed_config": "homeassistant.admin",
+    "home_assistant_reload_managed_config": "homeassistant.admin",
+    "home_assistant_websocket_command": "homeassistant.admin",
+    "home_assistant_delete_managed_config": "homeassistant.delete",
 }
 
 # Convert the legacy capability names into explicit OAuth scopes. Keeping the
@@ -203,6 +236,16 @@ SENSITIVE = {
     "delete_emails_permanently",
     "delete_mailbox",
     "set_default_account",
+    "home_assistant_call_service",
+    "home_assistant_fire_event",
+    "home_assistant_set_managed_config",
+    "home_assistant_delete_managed_config",
+    "home_assistant_websocket_command",
+    "home_assistant_create_entity",
+    "home_assistant_update_entity",
+    "home_assistant_update_entity_registry_entry",
+    "home_assistant_delete_entity",
+    "home_assistant_delete_entity_registry_entry",
 }
 
 
@@ -2225,3 +2268,648 @@ async def save_attachment(
         return await service.save_attachment(mailbox, uid, index)
 
     return await execute("save_attachment", account_name, action)
+
+
+async def _home_assistant_action(
+    tool: str,
+    callback: Callable[[HomeAssistantService], Awaitable[Any]],
+    *,
+    target: str | None = None,
+) -> dict[str, Any]:
+    success = False
+    try:
+        require_permission(
+            TOOL_PERMISSIONS[tool], current_permissions.get(), settings
+        )
+        output = await callback(HomeAssistantService(settings))
+        success = True
+        return result(output)
+    except Exception as exc:
+        if isinstance(exc, HomeAssistantAPIError):
+            return failure(
+                redact_home_assistant_text(str(exc), settings.home_assistant_token),
+                data=exc.metadata or None,
+            )
+        return failure(
+            redact_home_assistant_text(
+                getattr(exc, "detail", exc), settings.home_assistant_token
+            )
+        )
+    finally:
+        if TOOL_PERMISSIONS[tool] != "homeassistant.read":
+            try:
+                audit_event(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    action=tool,
+                    actor=current_actor.get(),
+                    target=target,
+                    success=success,
+                )
+            except Exception:
+                pass
+
+
+@mcp.tool()
+async def home_assistant_health_check() -> dict[str, Any]:
+    """Check Home Assistant URL, token, REST API and version. Permission: homeassistant.read."""
+
+    async def action(service: HomeAssistantService):
+        configured = bool(
+            settings.home_assistant_url
+            and settings.home_assistant_token
+            and settings.home_assistant_token != "A_REMPLIR"
+        )
+        if not configured:
+            return {"configured": False, "reachable": False}
+        api = await service.request("GET", "/api/")
+        config = await service.request("GET", "/api/config")
+        return {
+            "configured": True,
+            "reachable": True,
+            "api": api,
+            "version": config.get("version"),
+            "location_name": config.get("location_name"),
+            "time_zone": config.get("time_zone"),
+        }
+
+    return await _home_assistant_action("home_assistant_health_check", action)
+
+
+@mcp.tool()
+async def home_assistant_get_config() -> dict[str, Any]:
+    """Return Home Assistant core configuration and loaded components. Permission: homeassistant.read."""
+
+    async def action(service: HomeAssistantService):
+        return await service.request("GET", "/api/config")
+
+    return await _home_assistant_action("home_assistant_get_config", action)
+
+
+@mcp.tool()
+async def home_assistant_list_entities(
+    domains: list[str] | None = None,
+    states: list[str] | None = None,
+    search: str | None = None,
+    include_attributes: bool = True,
+    limit: int = 0,
+) -> dict[str, Any]:
+    """List all live entities/states, optionally filtered. limit=0 returns the whole house. Permission: homeassistant.read."""
+
+    async def action(service: HomeAssistantService):
+        if limit < 0 or limit > 10000:
+            raise ValueError("limit must be between 0 and 10000")
+        domain_filter = {
+            str(item).strip().lower() for item in (domains or []) if str(item).strip()
+        }
+        state_filter = {
+            str(item).strip().lower() for item in (states or []) if str(item).strip()
+        }
+        needle = str(search or "").strip().lower()
+        entities = []
+        domain_counts: dict[str, int] = {}
+        for item in await service.states():
+            entity_id = str(item.get("entity_id") or "")
+            domain = entity_id.partition(".")[0]
+            if domain_filter and domain not in domain_filter:
+                continue
+            if state_filter and str(item.get("state") or "").lower() not in state_filter:
+                continue
+            if needle and needle not in json.dumps(item, ensure_ascii=False).lower():
+                continue
+            domain_counts[domain] = domain_counts.get(domain, 0) + 1
+            if not include_attributes:
+                item = {
+                    key: item.get(key)
+                    for key in (
+                        "entity_id",
+                        "state",
+                        "last_changed",
+                        "last_updated",
+                    )
+                }
+            entities.append(item)
+        matched = len(entities)
+        if limit:
+            entities = entities[:limit]
+        return {
+            "entities": entities,
+            "matched": matched,
+            "returned": len(entities),
+            "domain_counts": domain_counts,
+        }
+
+    return await _home_assistant_action("home_assistant_list_entities", action)
+
+
+@mcp.tool()
+async def home_assistant_get_entity(entity_id: str) -> dict[str, Any]:
+    """Get one Home Assistant entity state and attributes. Permission: homeassistant.read."""
+
+    async def action(service: HomeAssistantService):
+        return await service.state(entity_id)
+
+    return await _home_assistant_action(
+        "home_assistant_get_entity", action, target=entity_id
+    )
+
+
+@mcp.tool()
+async def home_assistant_create_entity(
+    entity_id: str,
+    state: str,
+    attributes: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create a runtime state entity. It is not a physical device and may not persist across restart; use a HA helper/integration for persistence. Permission: homeassistant.admin."""
+
+    async def action(service: HomeAssistantService):
+        validated = validate_entity_id(entity_id)
+        try:
+            await service.state(validated)
+        except HomeAssistantAPIError as exc:
+            if exc.status_code != 404:
+                raise
+        else:
+            raise ValueError(f"entity already exists: {validated}")
+        created = await service.set_state(validated, state, attributes)
+        return {
+            "entity": created,
+            "created": True,
+            "persistent": False,
+            "warning": (
+                "This state-machine entity doesn't control a physical device "
+                "and may disappear after Home Assistant restarts"
+            ),
+        }
+
+    return await _home_assistant_action(
+        "home_assistant_create_entity", action, target=entity_id
+    )
+
+
+@mcp.tool()
+async def home_assistant_update_entity(
+    entity_id: str,
+    state: str | None = None,
+    attributes: dict[str, Any] | None = None,
+    merge_attributes: bool = True,
+) -> dict[str, Any]:
+    """Update an entity's runtime state representation. This does not command the physical device; use home_assistant_call_service for that. Permission: homeassistant.admin."""
+
+    async def action(service: HomeAssistantService):
+        validated = validate_entity_id(entity_id)
+        current = await service.state(validated)
+        next_state = current.get("state") if state is None else state
+        next_attributes = dict(current.get("attributes") or {}) if merge_attributes else {}
+        if attributes is not None:
+            next_attributes.update(attributes)
+        updated = await service.set_state(
+            validated, str(next_state), next_attributes
+        )
+        return {"entity": updated, "created": False}
+
+    return await _home_assistant_action(
+        "home_assistant_update_entity", action, target=entity_id
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(destructiveHint=True, idempotentHint=True)
+)
+async def home_assistant_delete_entity(entity_id: str) -> dict[str, Any]:
+    """Delete an entity from the runtime state machine. An integration-backed entity can reappear automatically. Destructive. Permission: homeassistant.delete."""
+
+    async def action(service: HomeAssistantService):
+        validated = validate_entity_id(entity_id)
+        deleted = await service.delete_state(validated)
+        return {"entity_id": validated, "deleted": True, "response": deleted}
+
+    return await _home_assistant_action(
+        "home_assistant_delete_entity", action, target=entity_id
+    )
+
+
+@mcp.tool()
+async def home_assistant_get_entity_registry_entry(
+    entity_id: str,
+) -> dict[str, Any]:
+    """Read one persistent entity-registry entry, including device, area, labels, aliases and integration metadata. Permission: homeassistant.read."""
+
+    async def action(service: HomeAssistantService):
+        validated = validate_entity_id(entity_id)
+        return await service.websocket_command(
+            {
+                "type": "config/entity_registry/get",
+                "entity_id": validated,
+            }
+        )
+
+    return await _home_assistant_action(
+        "home_assistant_get_entity_registry_entry",
+        action,
+        target=entity_id,
+    )
+
+
+@mcp.tool()
+async def home_assistant_update_entity_registry_entry(
+    entity_id: str,
+    changes: dict[str, Any],
+) -> dict[str, Any]:
+    """Update persistent registry metadata. Supported keys: name, new_entity_id, icon, area_id, aliases, labels, categories, device_class, disabled_by, hidden_by, options_domain and options. Permission: homeassistant.admin."""
+
+    async def action(service: HomeAssistantService):
+        validated = validate_entity_id(entity_id)
+        allowed = {
+            "aliases",
+            "area_id",
+            "categories",
+            "device_class",
+            "disabled_by",
+            "hidden_by",
+            "icon",
+            "labels",
+            "name",
+            "new_entity_id",
+            "options_domain",
+            "options",
+        }
+        if not isinstance(changes, dict) or not changes:
+            raise ValueError("changes must be a non-empty object")
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(
+                f"unsupported registry fields: {', '.join(sorted(unknown))}"
+            )
+        if ("options_domain" in changes) != ("options" in changes):
+            raise ValueError(
+                "options_domain and options must be provided together"
+            )
+        command = {
+            "type": "config/entity_registry/update",
+            "entity_id": validated,
+            **changes,
+        }
+        if command.get("new_entity_id") is not None:
+            command["new_entity_id"] = validate_entity_id(
+                str(command["new_entity_id"])
+            )
+        return await service.websocket_command(command)
+
+    return await _home_assistant_action(
+        "home_assistant_update_entity_registry_entry",
+        action,
+        target=entity_id,
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(destructiveHint=True, idempotentHint=True)
+)
+async def home_assistant_delete_entity_registry_entry(
+    entity_id: str,
+) -> dict[str, Any]:
+    """Remove an entity's persistent registry entry. Its integration can recreate it later. Destructive. Permission: homeassistant.delete."""
+
+    async def action(service: HomeAssistantService):
+        validated = validate_entity_id(entity_id)
+        response = await service.websocket_command(
+            {
+                "type": "config/entity_registry/remove",
+                "entity_id": validated,
+            }
+        )
+        return {
+            "entity_id": validated,
+            "registry_entry_deleted": True,
+            "response": response,
+        }
+
+    return await _home_assistant_action(
+        "home_assistant_delete_entity_registry_entry",
+        action,
+        target=entity_id,
+    )
+
+
+@mcp.tool()
+async def home_assistant_list_services(
+    domain: str | None = None,
+) -> dict[str, Any]:
+    """List callable Home Assistant service schemas, optionally for one domain. Permission: homeassistant.read."""
+
+    async def action(service: HomeAssistantService):
+        services = await service.services()
+        if domain:
+            services = [
+                item
+                for item in services
+                if str(item.get("domain") or "").lower() == domain.lower()
+            ]
+        return services
+
+    return await _home_assistant_action("home_assistant_list_services", action)
+
+
+@mcp.tool()
+async def home_assistant_call_service(
+    domain: str,
+    service: str,
+    data: dict[str, Any] | None = None,
+    return_response: bool = False,
+) -> dict[str, Any]:
+    """Control entities through any HA service (light.turn_on, climate.set_temperature, automation.trigger, ...). Permission: homeassistant.control."""
+
+    async def action(client: HomeAssistantService):
+        return await client.call_service(
+            domain, service, data or {}, return_response=return_response
+        )
+
+    return await _home_assistant_action(
+        "home_assistant_call_service", action, target=f"{domain}.{service}"
+    )
+
+
+@mcp.tool()
+async def home_assistant_fire_event(
+    event_type: str,
+    event_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Fire an event on the Home Assistant event bus. Permission: homeassistant.control."""
+
+    async def action(service: HomeAssistantService):
+        event = str(event_type or "").strip()
+        if not event or not all(
+            char.isalnum() or char == "_" for char in event
+        ):
+            raise ValueError("event_type must contain only letters, numbers and underscores")
+        return await service.request(
+            "POST", f"/api/events/{event}", payload=event_data or {}
+        )
+
+    return await _home_assistant_action(
+        "home_assistant_fire_event", action, target=event_type
+    )
+
+
+@mcp.tool()
+async def home_assistant_render_template(
+    template: str,
+    variables: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Render a Jinja template inside Home Assistant. Permission: homeassistant.control."""
+
+    async def action(service: HomeAssistantService):
+        if not str(template or "").strip():
+            raise ValueError("template must not be empty")
+        payload = {"template": template}
+        if variables:
+            payload["variables"] = variables
+        return await service.request("POST", "/api/template", payload=payload)
+
+    return await _home_assistant_action(
+        "home_assistant_render_template", action
+    )
+
+
+@mcp.tool()
+async def home_assistant_get_history(
+    start_time: str,
+    end_time: str | None = None,
+    entity_ids: list[str] | None = None,
+    minimal_response: bool = True,
+    no_attributes: bool = False,
+) -> dict[str, Any]:
+    """Get recorder history for a time range and optional entities. Permission: homeassistant.read."""
+
+    async def action(service: HomeAssistantService):
+        if entity_ids:
+            validated = [validate_entity_id(item) for item in entity_ids]
+        else:
+            validated = []
+        params: dict[str, Any] = {}
+        if end_time:
+            params["end_time"] = end_time
+        if validated:
+            params["filter_entity_id"] = ",".join(validated)
+        if minimal_response:
+            params["minimal_response"] = ""
+        if no_attributes:
+            params["no_attributes"] = ""
+        return await service.request(
+            "GET", f"/api/history/period/{start_time}", params=params
+        )
+
+    return await _home_assistant_action("home_assistant_get_history", action)
+
+
+@mcp.tool()
+async def home_assistant_get_logbook(
+    start_time: str,
+    end_time: str | None = None,
+    entity_id: str | None = None,
+) -> dict[str, Any]:
+    """Read the Home Assistant logbook for a time range. Permission: homeassistant.read."""
+
+    async def action(service: HomeAssistantService):
+        params: dict[str, Any] = {}
+        if end_time:
+            params["end_time"] = end_time
+        if entity_id:
+            params["entity"] = validate_entity_id(entity_id)
+        return await service.request(
+            "GET", f"/api/logbook/{start_time}", params=params
+        )
+
+    return await _home_assistant_action("home_assistant_get_logbook", action)
+
+
+@mcp.tool()
+async def home_assistant_api_get(
+    path: str,
+    params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Read any REST endpoint below /api/ (components, calendars, error_log, intent data, etc.). GET only. Permission: homeassistant.read."""
+
+    async def action(service: HomeAssistantService):
+        return await service.request("GET", path, params=params)
+
+    return await _home_assistant_action(
+        "home_assistant_api_get", action, target=path
+    )
+
+
+@mcp.tool()
+async def home_assistant_websocket_query(
+    command: dict[str, Any],
+) -> dict[str, Any]:
+    """Read HA topology through WebSocket: areas, floors, labels, devices, entity registry, config entries, panels, Lovelace, repairs or system health. Permission: homeassistant.read."""
+
+    async def action(service: HomeAssistantService):
+        command_type = str(command.get("type") or "")
+        if command_type not in READ_ONLY_WEBSOCKET_TYPES:
+            raise ValueError(
+                "WebSocket query type is not in the read-only allowlist; "
+                f"allowed: {', '.join(sorted(READ_ONLY_WEBSOCKET_TYPES))}"
+            )
+        return await service.websocket_command(command)
+
+    return await _home_assistant_action(
+        "home_assistant_websocket_query",
+        action,
+        target=str(command.get("type") or ""),
+    )
+
+
+@mcp.tool()
+async def home_assistant_websocket_command(
+    command: dict[str, Any],
+) -> dict[str, Any]:
+    """Advanced HA WebSocket escape hatch for administrative commands not covered by dedicated tools. Delete/remove commands additionally require homeassistant.delete. Permission: homeassistant.admin."""
+
+    async def action(service: HomeAssistantService):
+        command_type = str(command.get("type") or "").lower()
+        if any(part in command_type for part in ("delete", "remove")):
+            require_permission(
+                "homeassistant.delete", current_permissions.get(), settings
+            )
+        return await service.websocket_command(command)
+
+    return await _home_assistant_action(
+        "home_assistant_websocket_command",
+        action,
+        target=str(command.get("type") or ""),
+    )
+
+
+@mcp.tool()
+async def home_assistant_validate_automation(
+    trigger: Any | None = None,
+    condition: Any | None = None,
+    action_config: Any | None = None,
+) -> dict[str, Any]:
+    """Validate trigger, condition and action structures before saving an automation. Permission: homeassistant.admin."""
+
+    async def action(service: HomeAssistantService):
+        command: dict[str, Any] = {"type": "validate_config"}
+        if trigger is not None:
+            command["trigger"] = trigger
+        if condition is not None:
+            command["condition"] = condition
+        if action_config is not None:
+            command["action"] = action_config
+        if len(command) == 1:
+            raise ValueError(
+                "provide at least one of trigger, condition or action_config"
+            )
+        return await service.websocket_command(command)
+
+    return await _home_assistant_action(
+        "home_assistant_validate_automation", action
+    )
+
+
+@mcp.tool()
+async def home_assistant_check_config() -> dict[str, Any]:
+    """Run Home Assistant's configuration.yaml validation. Permission: homeassistant.admin."""
+
+    async def action(service: HomeAssistantService):
+        return await service.request(
+            "POST", "/api/config/core/check_config", payload={}
+        )
+
+    return await _home_assistant_action("home_assistant_check_config", action)
+
+
+@mcp.tool()
+async def home_assistant_get_managed_config(
+    config_type: str,
+    config_id: str,
+) -> dict[str, Any]:
+    """Get UI-managed automation, script or scene configuration. Permission: homeassistant.read."""
+
+    async def action(service: HomeAssistantService):
+        return await service.config_object(config_type, config_id)
+
+    return await _home_assistant_action(
+        "home_assistant_get_managed_config",
+        action,
+        target=f"{config_type}.{config_id}",
+    )
+
+
+@mcp.tool()
+async def home_assistant_set_managed_config(
+    config_type: str,
+    config_id: str,
+    config: dict[str, Any],
+    reload_after_save: bool = True,
+) -> dict[str, Any]:
+    """Create or update a UI-managed automation, script or scene, optionally reload its domain. Permission: homeassistant.admin."""
+
+    async def action(service: HomeAssistantService):
+        saved = await service.set_config_object(config_type, config_id, config)
+        reloaded = None
+        if reload_after_save:
+            kind = str(config_type).strip().lower()
+            reloaded = await service.call_service(kind, "reload", {})
+        return {
+            "config_type": config_type,
+            "config_id": config_id,
+            "saved": saved,
+            "reloaded": reloaded,
+        }
+
+    return await _home_assistant_action(
+        "home_assistant_set_managed_config",
+        action,
+        target=f"{config_type}.{config_id}",
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(destructiveHint=True, idempotentHint=True)
+)
+async def home_assistant_delete_managed_config(
+    config_type: str,
+    config_id: str,
+    reload_after_delete: bool = True,
+) -> dict[str, Any]:
+    """Permanently delete a UI-managed automation, script or scene. Destructive. Permission: homeassistant.delete."""
+
+    async def action(service: HomeAssistantService):
+        deleted = await service.delete_config_object(config_type, config_id)
+        reloaded = None
+        if reload_after_delete:
+            kind = str(config_type).strip().lower()
+            reloaded = await service.call_service(kind, "reload", {})
+        return {
+            "config_type": config_type,
+            "config_id": config_id,
+            "deleted": deleted,
+            "reloaded": reloaded,
+        }
+
+    return await _home_assistant_action(
+        "home_assistant_delete_managed_config",
+        action,
+        target=f"{config_type}.{config_id}",
+    )
+
+
+@mcp.tool()
+async def home_assistant_reload_managed_config(
+    config_type: str,
+) -> dict[str, Any]:
+    """Reload automations, scripts or scenes after external changes. Permission: homeassistant.admin."""
+
+    async def action(service: HomeAssistantService):
+        kind = str(config_type or "").strip().lower()
+        if kind not in {"automation", "script", "scene"}:
+            raise ValueError("config_type must be automation, script, or scene")
+        return await service.call_service(kind, "reload", {})
+
+    return await _home_assistant_action(
+        "home_assistant_reload_managed_config",
+        action,
+        target=config_type,
+    )

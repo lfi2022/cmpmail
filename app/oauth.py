@@ -61,6 +61,10 @@ SCOPES = {
     "nextcloud.delete": "Delete Nextcloud files, folders, shares and trash items",
     "telegram.read": "Read Telegram bot status, updates and pending button answers",
     "telegram.write": "Send Telegram messages, reports and inline buttons",
+    "homeassistant.read": "Read Home Assistant entities, topology, history and configuration",
+    "homeassistant.control": "Control Home Assistant devices, services, events and templates",
+    "homeassistant.admin": "Create and modify Home Assistant automations, scripts, scenes and configuration",
+    "homeassistant.delete": "Delete Home Assistant automations, scripts and scenes",
 }
 DEFAULT_SCOPES = [
     "openid",
@@ -72,6 +76,7 @@ DEFAULT_SCOPES = [
     "dolibarr.read",
     "nextcloud.read",
     "telegram.read",
+    "homeassistant.read",
 ]
 
 
