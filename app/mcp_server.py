@@ -1,6 +1,7 @@
 import email
 import base64
 import binascii
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -11,6 +12,7 @@ from typing import Any
 import httpx
 from mcp.server import MCPServer
 from mcp_types import ToolAnnotations
+from mcp_types import ImageContent, TextContent
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit import audit_event
@@ -53,6 +55,7 @@ from app.services.telegram import (
 from app.telegram_bot import BOT_COMMANDS, create_button_request, get_request, mark_request_delivered
 from app.services.mail import MailService, failure, partial, plain_forward, result
 from app.temp_files import delete_temporary_file, resolve_temporary_file
+from app.services.documents import pdf_info, read_pdf_pages, render_pdf_page
 from app.temp_media import (
     delete_temporary_image,
     download_temporary_image_from_url,
@@ -122,6 +125,10 @@ TOOL_PERMISSIONS = {
     "mail_list_attachments": "attachments",
     "mail_get_attachment": "attachments",
     "mail_parse_ubl_temporary_file": "attachments",
+    "document_get_info": "attachments",
+    "document_read_pdf": "attachments",
+    "document_read_pdf_all": "attachments",
+    "document_render_pdf_page": "attachments",
     "facebook_list_pages": "facebook.read",
     "facebook_get_page": "facebook.read",
     "facebook_list_posts": "facebook.read",
@@ -2237,6 +2244,72 @@ async def mail_parse_ubl_temporary_file(temporary_file_id: str) -> dict[str, Any
         path, metadata = resolve_temporary_file(settings, temporary_file_id)
         parsed = parse_ubl_invoice(path.read_bytes())
         return result({"temporary_file_id": temporary_file_id, "sha256": metadata["sha256"], "ubl": parsed}) if parsed else failure("File is not a supported UBL Invoice or CreditNote XML")
+    except Exception as exc:
+        return failure(getattr(exc, "detail", str(exc)))
+
+
+async def _private_pdf_action(tool: str, temporary_file_id: str, action):
+    """Run a bounded document operation against the existing private store."""
+    try:
+        require_permission(TOOL_PERMISSIONS[tool], current_permissions.get(), settings)
+        path, metadata = resolve_temporary_file(settings, temporary_file_id)
+        return result(await action(path, metadata))
+    except Exception as exc:
+        return failure(getattr(exc, "detail", str(exc)))
+
+
+@mcp.tool()
+async def document_get_info(temporary_file_id: str) -> dict[str, Any]:
+    """Get private PDF metadata, page count and OCR hints. No document interpretation. Permission: mail.attachments."""
+    async def action(path, metadata):
+        return await asyncio.to_thread(pdf_info, path, metadata, settings)
+    return await _private_pdf_action("document_get_info", temporary_file_id, action)
+
+
+@mcp.tool()
+async def document_read_pdf(
+    temporary_file_id: str,
+    page: int = 1,
+    max_chars: int = 20_000,
+    ocr: str = "auto",
+) -> dict[str, Any]:
+    """Read one PDF page from the private attachment store. Returns source text only. Permission: mail.attachments."""
+    async def action(path, metadata):
+        data = await asyncio.to_thread(
+            read_pdf_pages, path, metadata, settings, page, page, max_chars, ocr
+        )
+        item = data.pop("pages")[0]
+        return {**data, **item}
+    return await _private_pdf_action("document_read_pdf", temporary_file_id, action)
+
+
+@mcp.tool()
+async def document_read_pdf_all(
+    temporary_file_id: str,
+    start_page: int = 1,
+    end_page: int = 5,
+    max_chars: int = 60_000,
+    ocr: str = "auto",
+) -> dict[str, Any]:
+    """Read a bounded page range from a private PDF; response states next_page when truncated. Permission: mail.attachments."""
+    async def action(path, metadata):
+        return await asyncio.to_thread(
+            read_pdf_pages, path, metadata, settings, start_page, end_page, max_chars, ocr
+        )
+    return await _private_pdf_action("document_read_pdf_all", temporary_file_id, action)
+
+
+@mcp.tool()
+async def document_render_pdf_page(temporary_file_id: str, page: int = 1):
+    """Render one private PDF page as a PNG MCP image content block. Permission: mail.attachments."""
+    try:
+        require_permission(TOOL_PERMISSIONS["document_render_pdf_page"], current_permissions.get(), settings)
+        path, metadata = resolve_temporary_file(settings, temporary_file_id)
+        image, details = await asyncio.to_thread(render_pdf_page, path, metadata, settings, page)
+        return [
+            TextContent(type="text", text=json.dumps({"success": True, "data": details})),
+            ImageContent(type="image", data=base64.b64encode(image).decode("ascii"), mimeType="image/png"),
+        ]
     except Exception as exc:
         return failure(getattr(exc, "detail", str(exc)))
 

@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     temporary_file_dir: Path = Path("data/attachments/temp")
     temporary_file_ttl_minutes: int = 30
     temporary_file_max_bytes: int = 25 * 1024 * 1024
+    pdf_max_pages: int = 100
+    pdf_max_chars: int = 60_000
+    pdf_ocr_min_text_chars: int = 32
+    pdf_ocr_timeout_seconds: int = 30
+    pdf_render_scale: float = 2.0
+    pdf_render_max_pixels: int = 12_000_000
+    pdf_render_max_bytes: int = 10 * 1024 * 1024
     temporary_media_public_enabled: bool = False
     max_raw_message_size_mb: int = 10
     read_only: bool = False
